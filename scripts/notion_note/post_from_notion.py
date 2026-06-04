@@ -318,7 +318,7 @@ def _sanitize_attr(value: str) -> str:
 def _image_html_lines(images: list[NotionImage]) -> list[str]:
     lines: list[str] = []
     for index, image in enumerate(images, start=1):
-        alt = image.caption or f"Notion画像{index}"
+        alt = image.caption or f"Notion本文画像{index}"
         lines.extend(["", f'<img src="{_sanitize_attr(image.url)}" alt="{_sanitize_attr(alt)}">'])
     return lines
 
@@ -441,9 +441,10 @@ def build_markdown_from_notion(client: NotionClient, page_id: str) -> tuple[str,
     lines = _drop_duplicate_title_heading(lines, title)
     body = "\n".join(lines).strip()
     body = _strip_frontmatter(body)
-    body = _insert_images_after_executive_summary(body, images)
+    body_images = images[1:] if len(images) > 1 else []
+    body = _insert_images_after_executive_summary(body, body_images)
 
-    top_image = _page_cover_image(page) or (images[0] if images else None)
+    top_image = images[0] if images else _page_cover_image(page)
     output_lines = [f"# {title}", ""]
     if youtube_url:
         output_lines.extend([youtube_url, ""])
@@ -454,6 +455,7 @@ def build_markdown_from_notion(client: NotionClient, page_id: str) -> tuple[str,
         "title": title,
         "youtube_url": youtube_url,
         "image_count": len(images),
+        "body_image_count": len(body_images),
         "top_image_url": top_image.url if top_image else "",
     }
 

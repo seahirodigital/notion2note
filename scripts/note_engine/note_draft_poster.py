@@ -2503,6 +2503,12 @@ def markdown_to_note_html(md: str) -> str:
             i += 1
             continue
 
+        # 画像HTML単独行 → 通常段落の文字列にせず、本文画像として渡す
+        if re.match(r'^<img\b[^>]*>\s*$', stripped, flags=re.IGNORECASE):
+            html_parts.append(stripped)
+            i += 1
+            continue
+
         # 通常段落
         text = _inline_format(stripped)
         html_parts.append(f'<p>{text}</p>')

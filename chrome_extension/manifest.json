@@ -1,0 +1,15 @@
+{
+  "manifest_version": 3,
+  "name": "Notion2Note Switch",
+  "version": "0.1.0",
+  "description": "NotionページからGitHub Actionsを起動してnote投稿します。",
+  "permissions": ["activeTab", "storage", "tabs"],
+  "host_permissions": [
+    "https://api.github.com/*",
+    "https://www.notion.so/*",
+    "https://*.notion.site/*"
+  ],
+  "action": {
+    "default_popup": "popup.html"
+  }
+}

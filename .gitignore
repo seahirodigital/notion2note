@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+
+note_storage_state.json
+adobe_express_storage_state.json
+*.local.json

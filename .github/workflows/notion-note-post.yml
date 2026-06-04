@@ -1,0 +1,160 @@
+name: Notion記事 note投稿
+
+on:
+  workflow_dispatch:
+    inputs:
+      notion_page_id:
+        description: "NotionページID"
+        required: false
+        type: string
+      notion_page_url:
+        description: "NotionページURL"
+        required: false
+        type: string
+      publish:
+        description: "公開投稿まで進める"
+        required: false
+        default: false
+        type: boolean
+      dry_run_publish:
+        description: "公開画面まで進めるが最後の投稿ボタンは押さない"
+        required: false
+        default: false
+        type: boolean
+      no_top_image:
+        description: "Notion先頭画像のトップ画像設定をスキップする"
+        required: false
+        default: false
+        type: boolean
+      no_ogp:
+        description: "OGP展開をスキップする"
+        required: false
+        default: false
+        type: boolean
+      no_toc:
+        description: "目次挿入をスキップする"
+        required: false
+        default: false
+        type: boolean
+      affiliate_memo:
+        description: "使用するアフィリエイトMEMO番号"
+        required: false
+        default: "1"
+        type: string
+      affiliate_count:
+        description: "各H2章末に挿入するアフィリエイト数"
+        required: false
+        default: "2"
+        type: string
+      note_target:
+        description: "note投稿先（blog_main / xpost_tech / info_viewer）"
+        required: false
+        default: "blog_main"
+        type: string
+
+jobs:
+  post-to-note:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+
+    steps:
+      - name: リポジトリをチェックアウト
+        uses: actions/checkout@v4
+
+      - name: Python 3.13 セットアップ
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: "pip"
+          cache-dependency-path: requirements.txt
+
+      - name: Python 依存パッケージをインストール
+        run: pip install -r requirements.txt
+
+      - name: Playwright ブラウザをインストール
+        run: playwright install --with-deps chromium
+
+      - name: note 保存先の認証情報を選択
+        env:
+          NOTE_TARGET: ${{ inputs.note_target }}
+          BLOG_NOTE_EMAIL: ${{ secrets.NOTE_EMAIL }}
+          BLOG_NOTE_PASSWORD: ${{ secrets.NOTE_PASSWORD }}
+          BLOG_NOTE_STORAGE_STATE: ${{ secrets.NOTE_STORAGE_STATE }}
+          XPOST_NOTE_EMAIL: ${{ secrets.NOTE_EMAIL_XPOST_TECH }}
+          XPOST_NOTE_PASSWORD: ${{ secrets.NOTE_PASSWORD_XPOST_TECH }}
+          XPOST_NOTE_STORAGE_STATE: ${{ secrets.NOTE_STORAGE_STATE_XPOST_TECH }}
+          INFO_VIEWER_NOTE_EMAIL: ${{ secrets.NOTE_EMAIL_INFO_VIEWER }}
+          INFO_VIEWER_NOTE_PASSWORD: ${{ secrets.NOTE_PASSWORD_INFO_VIEWER }}
+          INFO_VIEWER_NOTE_STORAGE_STATE: ${{ secrets.NOTE_STORAGE_STATE_INFO_VIEWER }}
+        run: |
+          if [ "$NOTE_TARGET" = "info_viewer" ]; then
+            echo "NOTE_EMAIL=${INFO_VIEWER_NOTE_EMAIL}" >> "$GITHUB_ENV"
+            echo "NOTE_PASSWORD=${INFO_VIEWER_NOTE_PASSWORD}" >> "$GITHUB_ENV"
+            echo "NOTE_STORAGE_SECRET_NAME=NOTE_STORAGE_STATE_INFO_VIEWER" >> "$GITHUB_ENV"
+            {
+              echo "NOTE_STORAGE_STATE<<__NOTE_STORAGE_STATE__"
+              echo "${INFO_VIEWER_NOTE_STORAGE_STATE}"
+              echo "__NOTE_STORAGE_STATE__"
+            } >> "$GITHUB_ENV"
+          elif [ "$NOTE_TARGET" = "xpost_tech" ]; then
+            echo "NOTE_EMAIL=${XPOST_NOTE_EMAIL}" >> "$GITHUB_ENV"
+            echo "NOTE_PASSWORD=${XPOST_NOTE_PASSWORD}" >> "$GITHUB_ENV"
+            echo "NOTE_STORAGE_SECRET_NAME=NOTE_STORAGE_STATE_XPOST_TECH" >> "$GITHUB_ENV"
+            {
+              echo "NOTE_STORAGE_STATE<<__NOTE_STORAGE_STATE__"
+              echo "${XPOST_NOTE_STORAGE_STATE}"
+              echo "__NOTE_STORAGE_STATE__"
+            } >> "$GITHUB_ENV"
+          else
+            echo "NOTE_EMAIL=${BLOG_NOTE_EMAIL}" >> "$GITHUB_ENV"
+            echo "NOTE_PASSWORD=${BLOG_NOTE_PASSWORD}" >> "$GITHUB_ENV"
+            echo "NOTE_STORAGE_SECRET_NAME=NOTE_STORAGE_STATE" >> "$GITHUB_ENV"
+            {
+              echo "NOTE_STORAGE_STATE<<__NOTE_STORAGE_STATE__"
+              echo "${BLOG_NOTE_STORAGE_STATE}"
+              echo "__NOTE_STORAGE_STATE__"
+            } >> "$GITHUB_ENV"
+          fi
+
+      - name: Notion記事をnoteへ投稿
+        env:
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GH_PAT }}
+          NOTION_PAGE_ID: ${{ inputs.notion_page_id }}
+          NOTION_PAGE_URL: ${{ inputs.notion_page_url }}
+        run: |
+          ARGS=(
+            --result-json "$RUNNER_TEMP/notion_note_result.json"
+            --dump-markdown "$RUNNER_TEMP/notion_article.md"
+            --affiliate-memo "${{ inputs.affiliate_memo }}"
+            --affiliate-count "${{ inputs.affiliate_count }}"
+          )
+
+          if [ "${{ inputs.publish }}" = "true" ]; then
+            ARGS+=(--publish)
+          fi
+          if [ "${{ inputs.dry_run_publish }}" = "true" ]; then
+            ARGS+=(--dry-run-publish)
+          fi
+          if [ "${{ inputs.no_top_image }}" = "true" ]; then
+            ARGS+=(--no-top-image)
+          fi
+          if [ "${{ inputs.no_ogp }}" = "true" ]; then
+            ARGS+=(--no-ogp)
+          fi
+          if [ "${{ inputs.no_toc }}" = "true" ]; then
+            ARGS+=(--no-toc)
+          fi
+
+          python scripts/notion_note/post_from_notion.py "${ARGS[@]}"
+
+      - name: 投稿結果を保存
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: notion-note-result-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/notion_note_result.json
+            ${{ runner.temp }}/notion_article.md

@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Notion2Note Switch</title>
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body>
+    <main>
+      <h1>Notion2Note</h1>
+
+      <label>
+        GitHub Owner
+        <input id="owner" autocomplete="off">
+      </label>
+
+      <label>
+        Repository
+        <input id="repo" autocomplete="off">
+      </label>
+
+      <label>
+        Workflow
+        <input id="workflow" autocomplete="off">
+      </label>
+
+      <label>
+        Branch
+        <input id="ref" autocomplete="off">
+      </label>
+
+      <label>
+        GitHub Token
+        <input id="token" type="password" autocomplete="off">
+      </label>
+
+      <label>
+        Notion URL
+        <input id="pageUrl" autocomplete="off">
+      </label>
+
+      <div class="checks">
+        <label><input id="publish" type="checkbox"> 公開まで進める</label>
+        <label><input id="dryRunPublish" type="checkbox"> 投稿ボタンだけ押さない</label>
+        <label><input id="noTopImage" type="checkbox"> トップ画像をスキップ</label>
+      </div>
+
+      <button id="dispatch">Actionsを起動</button>
+      <p id="status" role="status"></p>
+    </main>
+    <script src="popup.js"></script>
+  </body>
+</html>

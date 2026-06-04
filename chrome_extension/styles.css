@@ -5,20 +5,62 @@
   background: #f7f7f5;
 }
 
+* {
+  box-sizing: border-box;
+}
+
 body {
-  width: 360px;
+  width: 380px;
   margin: 0;
 }
 
 main {
-  padding: 16px;
+  padding: 14px;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
 }
 
 h1 {
-  margin: 0 0 14px;
+  margin: 0;
   font-size: 18px;
   font-weight: 700;
   letter-spacing: 0;
+}
+
+.quick-links {
+  display: flex;
+  gap: 6px;
+}
+
+.quick-link {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border: 1px solid #c8c8c2;
+  border-radius: 6px;
+  color: #1f4e79;
+  background: #fff;
+  font-size: 14px;
+  font-weight: 800;
+  text-decoration: none;
+}
+
+.quick-link:hover {
+  border-color: #1f6feb;
+  color: #1f6feb;
+}
+
+.action-panel {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 10px;
 }
 
 label {
@@ -30,6 +72,7 @@ label {
 }
 
 input {
+  width: 100%;
   min-height: 34px;
   border: 1px solid #c8c8c2;
   border-radius: 6px;
@@ -39,24 +82,43 @@ input {
 }
 
 .checks {
-  margin: 12px 0;
+  display: grid;
+  gap: 6px;
+  margin: 10px 0 12px;
+  padding: 10px;
+  border: 1px solid #deded8;
+  border-radius: 6px;
+  background: #fff;
 }
 
 .checks label {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin: 8px 0;
+  margin: 0;
   font-weight: 500;
 }
 
 .checks input {
+  width: auto;
   min-height: 0;
+}
+
+.url-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 64px;
+  gap: 8px;
+}
+
+.settings {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid #deded8;
 }
 
 button {
   width: 100%;
-  height: 38px;
+  min-height: 38px;
   border: 0;
   border-radius: 6px;
   background: #1f6feb;
@@ -66,6 +128,14 @@ button {
   cursor: pointer;
 }
 
+.secondary-button {
+  min-height: 34px;
+  border: 1px solid #b9bbb4;
+  background: #fff;
+  color: #222;
+  font-size: 12px;
+}
+
 button:disabled {
   cursor: wait;
   opacity: 0.65;
@@ -73,7 +143,7 @@ button:disabled {
 
 #status {
   min-height: 20px;
-  margin: 10px 0 0;
+  margin: 0;
   font-size: 12px;
   line-height: 1.5;
   color: #444;

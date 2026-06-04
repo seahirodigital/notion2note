@@ -29,6 +29,7 @@ import argparse
 import importlib.util
 import tempfile
 from pathlib import Path
+from urllib.parse import unquote, urlparse
 
 import requests as http_requests
 
@@ -64,6 +65,7 @@ NOTE_DISCLOSURE_FULL_TEXT = (
     "文章にはAIの整形・編集が含まれます。"
 )
 NOTE_DISCLOSURE_MARKERS = [NOTE_DISCLOSURE_FULL_TEXT, NOTE_DISCLOSURE_PREFIX]
+NOTE_TOC_MARKER = "[[NOTION_NOTE_TOC]]"
 NOTE_POST_TAGS = (
     "エッセイ 写真 毎日note 小説 イラスト 競艇予想屋 ボートレース予想 競輪予想 "
     "スキしてみて note 毎日更新  仕事 音楽 マンガ コラム 人生 自分 競艇投資 "
@@ -1141,7 +1143,7 @@ def _insert_toc_by_slash_popup(page) -> str:
 
 
 def _insert_table_of_contents(page, source_markdown: str = "") -> dict:
-    """アソシエイト表記の直後にnote標準の目次ブロックを挿入する。"""
+    """専用マーカー位置へnote標準の目次ブロックを挿入する。"""
     result = {"success": False, "strategy": "", "already_exists": False}
     first_h2_after_disclosure = _extract_first_h2_after_disclosure(source_markdown)
     if _editor_has_table_of_contents(page):
@@ -1152,16 +1154,23 @@ def _insert_table_of_contents(page, source_markdown: str = "") -> dict:
         print("   ✅ 目次は既に挿入済みです")
         return result
 
-    if not _place_caret_after_disclosure(page):
-        print("   ⚠️ アソシエイト表記が見つからないため、目次挿入をスキップします")
-        result["strategy"] = "disclosure_not_found"
-        return result
+    marker_result = _place_caret_at_body_image_marker(page, NOTE_TOC_MARKER)
+    result["marker_result"] = marker_result
+    if marker_result.get("ok"):
+        page.wait_for_timeout(500)
+        page.keyboard.press("Backspace")
+        page.wait_for_timeout(900)
+    else:
+        if not _place_caret_after_disclosure(page):
+            print("   ⚠️ 目次マーカーとアソシエイト表記が見つからないため、目次挿入をスキップします")
+            result["strategy"] = "toc_marker_and_disclosure_not_found"
+            return result
 
-    page.wait_for_timeout(500)
-    page.keyboard.press("Enter")
-    page.wait_for_timeout(500)
-    page.keyboard.press("Enter")
-    page.wait_for_timeout(900)
+        page.wait_for_timeout(500)
+        page.keyboard.press("Enter")
+        page.wait_for_timeout(500)
+        page.keyboard.press("Enter")
+        page.wait_for_timeout(900)
 
     # noteのエディタでは、アソシエイト表記直後に空段落を作り、「/」で出るポップアップから目次を挿入する。
     try:
@@ -1364,6 +1373,128 @@ def _save_optional_body_image_crop_dialog(page) -> str:
         return "no_crop_dialog"
 
 
+def _body_image_text_candidates(item: dict) -> list[str]:
+    candidates: list[str] = []
+
+    def add(value: str) -> None:
+        text = str(value or "").strip()
+        if len(text) >= 4:
+            candidates.append(text)
+
+    for value in item.get("text_candidates") or []:
+        add(str(value))
+
+    caption = str(item.get("caption") or "").strip()
+    if caption and (re.search(r"\.(?:png|jpe?g|webp|gif|bmp|svg)\b", caption, re.IGNORECASE) or "_" in caption):
+        add(caption)
+
+    for key in ("source", "path"):
+        raw_value = str(item.get(key) or "").strip()
+        if not raw_value:
+            continue
+        parsed = urlparse(raw_value)
+        path_value = parsed.path if parsed.scheme and len(parsed.scheme) > 1 else raw_value
+        name = Path(unquote(path_value)).name.strip()
+        if name:
+            add(name)
+            stem = Path(name).stem.strip()
+            if stem and stem != name:
+                add(stem)
+        if key == "path":
+            add(raw_value)
+
+    return list(dict.fromkeys(candidates))
+
+
+def _cleanup_body_image_artifacts(page, text_candidates: list[str]) -> dict:
+    candidates = list(dict.fromkeys(str(candidate).strip() for candidate in text_candidates if str(candidate).strip()))
+    return page.evaluate(
+        """
+        (candidates) => {
+          const editor = document.querySelector('.note-editable, [contenteditable="true"]') || document.querySelector('.ProseMirror');
+          if (!editor) return { success: false, reason: 'editor_not_found', removed_empty_blocks: 0, removed_text_blocks: 0 };
+
+          const normalize = (value) => String(value || '')
+            .replace(/\\u200B/g, '')
+            .replace(/\\s+/g, ' ')
+            .trim();
+          const simplify = (value) => normalize(value).replace(/\\s+/g, '').toLowerCase();
+          const candidateTexts = Array.from(new Set((candidates || []).map(normalize).filter((value) => value.length >= 4)));
+          const candidateKeys = candidateTexts.map(simplify).filter((value) => value.length >= 4);
+          const maxCandidateLength = candidateTexts.reduce((max, value) => Math.max(max, value.length), 0);
+          const hasMedia = (el) => Boolean(el && el.querySelector && el.querySelector('img, picture, video, iframe, canvas'));
+          const hasInteractive = (el) => Boolean(el && el.querySelector && el.querySelector('a, button, input, textarea, select'));
+          const isSimpleContainer = (el) => {
+            const tag = (el.tagName || '').toUpperCase();
+            if (tag !== 'DIV') return true;
+            return !el.querySelector('p, h1, h2, h3, h4, h5, h6, ul, ol, figure, blockquote');
+          };
+          const matchesCandidate = (text) => {
+            const key = simplify(text);
+            if (!key || key.length < 4) return false;
+            return candidateKeys.some((candidate) => {
+              if (candidate === key) return true;
+              if (candidate.length >= 8 && key.length >= 8 && (candidate.startsWith(key) || key.startsWith(candidate))) return true;
+              if (candidate.length >= 14 && key.includes(candidate)) return true;
+              if (key.length >= 14 && candidate.includes(key)) return true;
+              return false;
+            });
+          };
+
+          let removedTextBlocks = 0;
+          if (candidateKeys.length) {
+            const textBlocks = Array.from(editor.querySelectorAll('p, li, figcaption, div'));
+            for (const block of textBlocks) {
+              if (!block.isConnected || hasMedia(block) || hasInteractive(block) || !isSimpleContainer(block)) continue;
+              const text = normalize(block.innerText || block.textContent || '');
+              if (!text || text.length > Math.max(80, maxCandidateLength + 50)) continue;
+              if (!matchesCandidate(text)) continue;
+              block.remove();
+              removedTextBlocks += 1;
+            }
+          }
+
+          const isEmptyBlock = (el) => {
+            if (!el || !el.isConnected || hasMedia(el) || hasInteractive(el)) return false;
+            const tag = (el.tagName || '').toUpperCase();
+            if (!['P', 'DIV', 'LI'].includes(tag)) return false;
+            if (!isSimpleContainer(el)) return false;
+            return normalize(el.innerText || el.textContent || '') === '';
+          };
+          const siblingHasMedia = (el) => {
+            const prev = el.previousElementSibling;
+            const next = el.nextElementSibling;
+            return hasMedia(prev) || hasMedia(next);
+          };
+
+          let removedEmptyBlocks = 0;
+          for (let pass = 0; pass < 20; pass += 1) {
+            let changed = false;
+            const emptyBlocks = Array.from(editor.querySelectorAll('p, div, li'));
+            for (const block of emptyBlocks) {
+              if (!isEmptyBlock(block) || !siblingHasMedia(block)) continue;
+              block.remove();
+              removedEmptyBlocks += 1;
+              changed = true;
+            }
+            if (!changed) break;
+          }
+
+          if (removedTextBlocks || removedEmptyBlocks) {
+            editor.dispatchEvent(new Event('input', { bubbles: true }));
+          }
+          return {
+            success: true,
+            removed_empty_blocks: removedEmptyBlocks,
+            removed_text_blocks: removedTextBlocks,
+            candidate_count: candidateTexts.length,
+          };
+        }
+        """,
+        candidates,
+    )
+
+
 def _attach_body_images_to_page(
     page,
     body_image_uploads: list[dict] | None,
@@ -1382,14 +1513,18 @@ def _attach_body_images_to_page(
         return result
 
     print(f"   🖼️ Notion本文画像をnote画像ブロックとして添付します: {len(uploads)}件")
+    cleanup_candidates: list[str] = []
     for index, item in enumerate(uploads, start=1):
         marker = str(item.get("marker") or "")
         image_path = Path(str(item.get("path") or ""))
+        item_cleanup_candidates = _body_image_text_candidates(item)
+        cleanup_candidates.extend(item_cleanup_candidates)
         item_result = {
             "index": index,
             "marker": marker,
             "path": str(image_path),
             "source": str(item.get("source") or ""),
+            "cleanup_candidates": item_cleanup_candidates,
             "success": False,
         }
         try:
@@ -1441,6 +1576,18 @@ def _attach_body_images_to_page(
             except Exception:
                 pass
         result["items"].append(item_result)
+
+    try:
+        result["cleanup"] = _cleanup_body_image_artifacts(page, cleanup_candidates)
+        cleanup = result["cleanup"]
+        if cleanup.get("removed_empty_blocks") or cleanup.get("removed_text_blocks"):
+            print(
+                "   ✅ 本文画像まわりの不要テキストと空段落を削除しました: "
+                f"text={cleanup.get('removed_text_blocks', 0)} / empty={cleanup.get('removed_empty_blocks', 0)}"
+            )
+    except Exception as exc:
+        result["cleanup"] = {"success": False, "error": str(exc)}
+        print(f"   ⚠️ 本文画像まわりの後処理に失敗しました: {exc}")
 
     return result
 

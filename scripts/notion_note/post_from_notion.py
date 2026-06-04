@@ -17,7 +17,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 import requests
 
@@ -44,6 +44,9 @@ NOTION_UUID_RE = re.compile(
     r"(?i)([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"
 )
 BODY_IMAGE_MARKER_TEMPLATE = "[[NOTION_NOTE_BODY_IMAGE_{index:03d}]]"
+AFFILIATE_SLOT_TEMPLATE = "[[NOTION_NOTE_AFFILIATE_{index:03d}]]"
+AFFILIATE_SLOT_RE = re.compile(r"\[\[NOTION_NOTE_AFFILIATE_(\d{3})\]\]")
+TOC_MARKER = "[[NOTION_NOTE_TOC]]"
 
 
 @dataclass
@@ -316,51 +319,180 @@ def _sanitize_attr(value: str) -> str:
     )
 
 
-def _body_image_items(images: list[NotionImage]) -> list[dict[str, str]]:
+def _trim_blank_lines(lines: list[str]) -> list[str]:
+    updated = list(lines)
+    while updated and not updated[0].strip():
+        updated.pop(0)
+    while updated and not updated[-1].strip():
+        updated.pop()
+    return updated
+
+
+def _is_h2_line(line: str) -> bool:
+    stripped = str(line or "").strip()
+    return stripped.startswith("## ") and not stripped.startswith("### ")
+
+
+def _clean_h2_title(line_or_title: str) -> str:
+    title = re.sub(r"^##\s+", "", str(line_or_title or "").strip())
+    title = re.sub(r"<[^>]+>", "", title).strip()
+    title = re.sub(r"^[A-CＡ-Ｃa-cａ-ｃ]\s*[:：.\-・]\s*", "", title).strip()
+    return title
+
+
+def _article_section_kind(title: str) -> str:
+    normalized = re.sub(r"[\s:：・･_\-ー－]+", "", _clean_h2_title(title)).lower()
+    if "エグゼクティブサマリ" in normalized or "executivesummary" in normalized:
+        return "executive"
+    if "インサイトまとめ" in normalized or "insight" in normalized:
+        return "insight"
+    if "詳細情報" in normalized or "詳細" in normalized or "detail" in normalized:
+        return "detail"
+    return "other"
+
+
+def _is_plain_youtube_line(line: str) -> bool:
+    stripped = str(line or "").strip().rstrip(").,、。")
+    return bool(YOUTUBE_RE.fullmatch(stripped))
+
+
+def _drop_youtube_lines(lines: list[str]) -> list[str]:
+    return [line for line in lines if not _is_plain_youtube_line(line)]
+
+
+def _article_sections(markdown: str) -> tuple[list[str], list[dict[str, Any]]]:
+    prefix_lines: list[str] = []
+    sections: list[dict[str, Any]] = []
+    current: dict[str, Any] | None = None
+    for line in str(markdown or "").replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        if _is_h2_line(line):
+            if current is not None:
+                current["lines"] = _trim_blank_lines(current["lines"])
+                sections.append(current)
+            title = _clean_h2_title(line)
+            current = {"title": title, "kind": _article_section_kind(title), "lines": []}
+            continue
+        if current is None:
+            prefix_lines.append(line)
+        else:
+            current["lines"].append(line)
+    if current is not None:
+        current["lines"] = _trim_blank_lines(current["lines"])
+        sections.append(current)
+    return _trim_blank_lines(prefix_lines), sections
+
+
+def _collect_section_lines(sections: list[dict[str, Any]], *kinds: str) -> list[str]:
+    collected: list[str] = []
+    wanted = set(kinds)
+    for section in sections:
+        if section.get("kind") not in wanted:
+            continue
+        lines = _trim_blank_lines(_drop_youtube_lines(list(section.get("lines") or [])))
+        if not lines:
+            continue
+        if collected:
+            collected.append("")
+        collected.extend(lines)
+    return _trim_blank_lines(collected)
+
+
+def _collect_detail_lines(sections: list[dict[str, Any]]) -> list[str]:
+    collected = _collect_section_lines(sections, "detail")
+    for section in sections:
+        if section.get("kind") != "other":
+            continue
+        title = _clean_h2_title(str(section.get("title") or ""))
+        lines = _trim_blank_lines(_drop_youtube_lines(list(section.get("lines") or [])))
+        if not title and not lines:
+            continue
+        if collected:
+            collected.append("")
+        if title:
+            collected.append(f"### {title}")
+        collected.extend(lines)
+    return _trim_blank_lines(collected)
+
+
+def _append_template_lines(output: list[str], lines: list[str], blank_before: bool = True) -> None:
+    cleaned = _trim_blank_lines(lines)
+    if not cleaned:
+        return
+    if blank_before and output and output[-1].strip():
+        output.append("")
+    output.extend(cleaned)
+
+
+def _image_text_candidates(image: NotionImage) -> list[str]:
+    candidates: list[str] = []
+    caption = str(image.caption or "").strip()
+    if caption and (re.search(r"\.(?:png|jpe?g|webp|gif|bmp|svg)\b", caption, re.IGNORECASE) or "_" in caption):
+        candidates.append(caption)
+    parsed = urlparse(str(image.url or ""))
+    path_value = unquote(parsed.path or str(image.url or ""))
+    name = Path(path_value).name.strip()
+    if name:
+        candidates.append(name)
+        stem = Path(name).stem.strip()
+        if stem and stem != name:
+            candidates.append(stem)
+    return list(dict.fromkeys(candidate for candidate in candidates if len(candidate.strip()) >= 4))
+
+
+def _body_image_items(images: list[NotionImage]) -> list[dict[str, Any]]:
     return [
         {
             "marker": BODY_IMAGE_MARKER_TEMPLATE.format(index=index),
             "url": image.url,
             "caption": image.caption,
+            "text_candidates": _image_text_candidates(image),
         }
         for index, image in enumerate(images, start=1)
     ]
 
 
-def _body_image_marker_lines(body_images: list[dict[str, str]]) -> list[str]:
+def _body_image_marker_lines(body_images: list[dict[str, Any]]) -> list[str]:
     lines: list[str] = []
     for image in body_images:
         marker = str(image.get("marker") or "").strip()
         if marker:
-            lines.extend(["", marker])
+            lines.append(marker)
     return lines
 
 
-def _insert_body_image_markers_after_executive_summary(
-    markdown: str,
-    body_images: list[dict[str, str]],
+def _build_article_template(
+    title: str,
+    body_markdown: str,
+    youtube_url: str,
+    body_images: list[dict[str, Any]],
 ) -> str:
-    if not body_images:
-        return markdown
+    prefix_lines, sections = _article_sections(body_markdown)
+    executive_lines = _collect_section_lines(sections, "executive")
+    if not executive_lines:
+        executive_lines = _trim_blank_lines(_drop_youtube_lines(prefix_lines))
+    if not executive_lines and sections:
+        executive_lines = _trim_blank_lines(_drop_youtube_lines(list(sections[0].get("lines") or [])))
 
-    lines = markdown.replace("\r\n", "\n").replace("\r", "\n").split("\n")
-    h2_indices = [index for index, line in enumerate(lines) if line.startswith("## ") and not line.startswith("### ")]
-    target_index = -1
-    for order, h2_index in enumerate(h2_indices):
-        heading = _normalize_heading(lines[h2_index][3:])
-        if "エグゼクティブサマリー" in heading or "executivesummary" in heading:
-            next_h2 = h2_indices[order + 1] if order + 1 < len(h2_indices) else len(lines)
-            target_index = next_h2
-            break
+    insight_lines = _collect_section_lines(sections, "insight")
+    detail_lines = _collect_detail_lines(sections)
 
-    if target_index < 0:
-        target_index = h2_indices[1] if len(h2_indices) > 1 else len(lines)
-
-    while target_index > 0 and not lines[target_index - 1].strip():
-        target_index -= 1
-    insert_lines = _body_image_marker_lines(body_images)
-    updated = lines[:target_index] + insert_lines + [""] + lines[target_index:]
-    return "\n".join(updated).strip() + "\n"
+    output_lines = [f"# {title}"]
+    _append_template_lines(output_lines, executive_lines)
+    if youtube_url:
+        _append_template_lines(output_lines, [youtube_url])
+    _append_template_lines(output_lines, _body_image_marker_lines(body_images))
+    _append_template_lines(output_lines, [AFFILIATE_SLOT_TEMPLATE.format(index=1)])
+    _append_template_lines(output_lines, [TOC_MARKER])
+    _append_template_lines(output_lines, [DISCLOSURE_TEXT])
+    _append_template_lines(output_lines, ["## インサイトまとめ"])
+    _append_template_lines(output_lines, insight_lines, blank_before=False)
+    _append_template_lines(output_lines, [AFFILIATE_SLOT_TEMPLATE.format(index=2)])
+    _append_template_lines(output_lines, ["## 詳細情報"])
+    _append_template_lines(output_lines, detail_lines, blank_before=False)
+    _append_template_lines(output_lines, [AFFILIATE_SLOT_TEMPLATE.format(index=3)])
+    if youtube_url:
+        _append_template_lines(output_lines, [youtube_url])
+    return "\n".join(output_lines).strip() + "\n"
 
 
 def _strip_frontmatter(markdown: str) -> str:
@@ -394,6 +526,14 @@ def _split_affiliate_blocks(memo_content: str) -> list[str]:
     return blocks or ([memo_content.strip()] if memo_content.strip() else [])
 
 
+def _normalize_markdown_blank_lines(markdown: str) -> str:
+    return re.sub(r"\n{3,}", "\n\n", str(markdown or "")).strip() + "\n"
+
+
+def _remove_affiliate_slots(markdown: str) -> str:
+    return _normalize_markdown_blank_lines(AFFILIATE_SLOT_RE.sub("", markdown))
+
+
 def _insert_affiliate_after_each_h2(
     markdown: str,
     affiliate_file: Path,
@@ -403,6 +543,20 @@ def _insert_affiliate_after_each_h2(
 ) -> tuple[str, int]:
     memo_content = _read_affiliate_memo(affiliate_file, memo_number)
     blocks = _split_affiliate_blocks(memo_content)
+    slot_markers = list(dict.fromkeys(match.group(0) for match in AFFILIATE_SLOT_RE.finditer(markdown)))
+    if slot_markers:
+        if not blocks or per_h2_count <= 0:
+            return _remove_affiliate_slots(markdown), 0
+        rng = random.Random(seed) if seed else random.SystemRandom()
+        if len(blocks) >= len(slot_markers):
+            selected = rng.sample(blocks, len(slot_markers))
+        else:
+            selected = [rng.choice(blocks) for _ in slot_markers]
+        updated = markdown
+        for marker, block in zip(slot_markers, selected):
+            updated = updated.replace(marker, block.strip(), 1)
+        return _normalize_markdown_blank_lines(updated), len(selected)
+
     if not blocks or per_h2_count <= 0:
         return markdown, 0
 
@@ -458,21 +612,17 @@ def build_markdown_from_notion(client: NotionClient, page_id: str) -> tuple[str,
     body = "\n".join(lines).strip()
     body = _strip_frontmatter(body)
     body_images = _body_image_items(images[1:] if len(images) > 1 else [])
-    body = _insert_body_image_markers_after_executive_summary(body, body_images)
 
     top_image = images[0] if images else _page_cover_image(page)
-    output_lines = [f"# {title}", ""]
-    if youtube_url:
-        output_lines.extend([youtube_url, ""])
-    output_lines.extend([DISCLOSURE_TEXT, ""])
-    output_lines.extend(body.splitlines())
-    markdown = "\n".join(output_lines).strip() + "\n"
+    markdown = _build_article_template(title, body, youtube_url, body_images)
     return markdown, {
         "title": title,
         "youtube_url": youtube_url,
         "image_count": len(images),
         "body_image_count": len(body_images),
         "body_images": body_images,
+        "toc_marker": TOC_MARKER,
+        "affiliate_slots": 3,
         "top_image_url": top_image.url if top_image else "",
     }
 
@@ -517,8 +667,8 @@ def _download_image(source: str, label: str = "画像") -> tuple[Path | None, st
         return None, source
 
 
-def _download_body_images(body_images: list[dict[str, str]]) -> tuple[list[dict[str, str]], list[str]]:
-    uploads: list[dict[str, str]] = []
+def _download_body_images(body_images: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[str]]:
+    uploads: list[dict[str, Any]] = []
     sources: list[str] = []
     for index, image in enumerate(body_images, start=1):
         source = str(image.get("url") or "")
@@ -532,6 +682,7 @@ def _download_body_images(body_images: list[dict[str, str]]) -> tuple[list[dict[
                 "caption": str(image.get("caption") or ""),
                 "source": resolved_source,
                 "path": str(image_path),
+                "text_candidates": list(image.get("text_candidates") or []),
             }
         )
     return uploads, sources
@@ -602,6 +753,8 @@ def main() -> int:
         per_h2_count=max(0, args.affiliate_count),
         seed=args.affiliate_seed,
     )
+    if args.no_toc:
+        markdown = _normalize_markdown_blank_lines(markdown.replace(TOC_MARKER, ""))
     tags = _read_tags(Path(args.tag_file))
 
     top_image_path, top_image_source = (None, "")

@@ -4,7 +4,14 @@ const DEFAULTS = {
   workflow: "notion-note-post.yml",
   ref: "main",
   token: "",
+  pageUrl: "",
+  publish: false,
+  dryRunPublish: false,
+  noTopImage: false,
 };
+
+const TEXT_KEYS = ["owner", "repo", "workflow", "ref", "token", "pageUrl"];
+const CHECK_KEYS = ["publish", "dryRunPublish", "noTopImage"];
 
 const fields = {
   owner: document.getElementById("owner"),
@@ -17,11 +24,38 @@ const fields = {
   dryRunPublish: document.getElementById("dryRunPublish"),
   noTopImage: document.getElementById("noTopImage"),
   dispatch: document.getElementById("dispatch"),
+  loadUrl: document.getElementById("loadUrl"),
   status: document.getElementById("status"),
+  affiliateLink: document.getElementById("affiliateLink"),
+  tagLink: document.getElementById("tagLink"),
 };
+
+let saveTimer = 0;
 
 function setStatus(message) {
   fields.status.textContent = message;
+}
+
+function storagePayload() {
+  const payload = {};
+  for (const key of TEXT_KEYS) {
+    payload[key] = fields[key].value.trim();
+  }
+  for (const key of CHECK_KEYS) {
+    payload[key] = fields[key].checked;
+  }
+  return payload;
+}
+
+async function saveOptions() {
+  await chrome.storage.local.set(storagePayload());
+}
+
+function saveOptionsSoon() {
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => {
+    saveOptions().catch((error) => setStatus(error?.message || String(error)));
+  }, 180);
 }
 
 async function loadCurrentTabUrl() {
@@ -29,20 +63,50 @@ async function loadCurrentTabUrl() {
   return tab?.url || "";
 }
 
-async function loadOptions() {
-  const stored = await chrome.storage.local.get(DEFAULTS);
-  for (const key of ["owner", "repo", "workflow", "ref", "token"]) {
-    fields[key].value = stored[key] || DEFAULTS[key];
+function isNotionUrl(url) {
+  try {
+    const parsed = new URL(url);
+    return parsed.hostname.endsWith("notion.so") || parsed.hostname.endsWith("notion.site");
+  } catch {
+    return false;
   }
-  fields.pageUrl.value = await loadCurrentTabUrl();
 }
 
-async function saveOptions() {
-  const payload = {};
-  for (const key of ["owner", "repo", "workflow", "ref", "token"]) {
-    payload[key] = fields[key].value.trim();
+function updateQuickLinks() {
+  const owner = fields.owner.value.trim() || DEFAULTS.owner;
+  const repo = fields.repo.value.trim() || DEFAULTS.repo;
+  const ref = fields.ref.value.trim() || DEFAULTS.ref;
+  const refPath = encodeURIComponent(ref).replace(/%2F/g, "/");
+  const baseUrl = `https://github.com/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/blob/${refPath}`;
+  fields.affiliateLink.href = `${baseUrl}/affiliate_links.txt`;
+  fields.affiliateLink.title = `アフィリエイトリンクファイルを開く: ${fields.affiliateLink.href}`;
+  fields.tagLink.href = `${baseUrl}/tag.md`;
+  fields.tagLink.title = `タグファイルを開く: ${fields.tagLink.href}`;
+}
+
+async function refreshCurrentTabUrl(force = false) {
+  const currentUrl = await loadCurrentTabUrl();
+  if (!currentUrl) {
+    return "";
   }
-  await chrome.storage.local.set(payload);
+  if (force || isNotionUrl(currentUrl)) {
+    fields.pageUrl.value = currentUrl;
+    await saveOptions();
+  }
+  return currentUrl;
+}
+
+async function loadOptions() {
+  const stored = await chrome.storage.local.get(DEFAULTS);
+  for (const key of TEXT_KEYS) {
+    fields[key].value = stored[key] ?? DEFAULTS[key];
+  }
+  for (const key of CHECK_KEYS) {
+    fields[key].checked = Boolean(stored[key]);
+  }
+  updateQuickLinks();
+  await refreshCurrentTabUrl(false);
+  updateQuickLinks();
 }
 
 function requiredValue(key, label) {
@@ -89,9 +153,36 @@ async function dispatchWorkflow() {
   }
 }
 
+for (const key of TEXT_KEYS) {
+  fields[key].addEventListener("input", () => {
+    if (key === "owner" || key === "repo" || key === "ref") {
+      updateQuickLinks();
+    }
+    saveOptionsSoon();
+  });
+}
+
+for (const key of CHECK_KEYS) {
+  fields[key].addEventListener("change", () => {
+    saveOptions().catch((error) => setStatus(error?.message || String(error)));
+  });
+}
+
+fields.loadUrl.addEventListener("click", async () => {
+  fields.loadUrl.disabled = true;
+  try {
+    const currentUrl = await refreshCurrentTabUrl(true);
+    setStatus(currentUrl ? "現在のタブURLを取得しました。" : "現在のタブURLを取得できませんでした。");
+  } catch (error) {
+    setStatus(error?.message || String(error));
+  } finally {
+    fields.loadUrl.disabled = false;
+  }
+});
+
 fields.dispatch.addEventListener("click", async () => {
   fields.dispatch.disabled = true;
-  setStatus("起動しています...");
+  setStatus("Actionsを起動しています...");
   try {
     await dispatchWorkflow();
     setStatus("GitHub Actionsを起動しました。");

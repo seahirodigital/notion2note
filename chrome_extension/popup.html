@@ -8,46 +8,59 @@
   </head>
   <body>
     <main>
-      <h1>Notion2Note</h1>
+      <header class="topbar">
+        <h1>Notion2Note</h1>
+        <nav class="quick-links" aria-label="編集ファイル">
+          <a id="affiliateLink" class="quick-link" href="#" target="_blank" rel="noreferrer" title="アフィリエイトリンクファイルを開く">A</a>
+          <a id="tagLink" class="quick-link" href="#" target="_blank" rel="noreferrer" title="タグファイルを開く">#</a>
+        </nav>
+      </header>
 
-      <label>
-        GitHub Owner
-        <input id="owner" autocomplete="off">
-      </label>
-
-      <label>
-        Repository
-        <input id="repo" autocomplete="off">
-      </label>
-
-      <label>
-        Workflow
-        <input id="workflow" autocomplete="off">
-      </label>
-
-      <label>
-        Branch
-        <input id="ref" autocomplete="off">
-      </label>
-
-      <label>
-        GitHub Token
-        <input id="token" type="password" autocomplete="off">
-      </label>
-
-      <label>
-        Notion URL
-        <input id="pageUrl" autocomplete="off">
-      </label>
+      <section class="action-panel" aria-label="Actions起動">
+        <button id="dispatch">Actionsを起動</button>
+        <p id="status" role="status"></p>
+      </section>
 
       <div class="checks">
         <label><input id="publish" type="checkbox"> 公開まで進める</label>
-        <label><input id="dryRunPublish" type="checkbox"> 投稿ボタンだけ押さない</label>
+        <label><input id="dryRunPublish" type="checkbox"> 投稿ボタン直前で止める</label>
         <label><input id="noTopImage" type="checkbox"> トップ画像をスキップ</label>
       </div>
 
-      <button id="dispatch">Actionsを起動</button>
-      <p id="status" role="status"></p>
+      <label>
+        Notion URL
+        <span class="url-row">
+          <input id="pageUrl" autocomplete="off">
+          <button id="loadUrl" class="secondary-button" type="button">取得</button>
+        </span>
+      </label>
+
+      <section class="settings" aria-label="GitHub設定">
+        <label>
+          GitHub Owner
+          <input id="owner" autocomplete="off">
+        </label>
+
+        <label>
+          Repository
+          <input id="repo" autocomplete="off">
+        </label>
+
+        <label>
+          Workflow
+          <input id="workflow" autocomplete="off">
+        </label>
+
+        <label>
+          Branch
+          <input id="ref" autocomplete="off">
+        </label>
+
+        <label>
+          GitHub Token
+          <input id="token" type="password" autocomplete="off">
+        </label>
+      </section>
     </main>
     <script src="popup.js"></script>
   </body>

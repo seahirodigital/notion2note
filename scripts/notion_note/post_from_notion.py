@@ -43,6 +43,7 @@ NOTION_ID_RE = re.compile(r"(?i)([0-9a-f]{32})")
 NOTION_UUID_RE = re.compile(
     r"(?i)([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"
 )
+BODY_IMAGE_MARKER_TEMPLATE = "[[NOTION_NOTE_BODY_IMAGE_{index:03d}]]"
 
 
 @dataclass
@@ -208,7 +209,7 @@ def _is_transcript_heading(text: str) -> bool:
 
 
 def _normalize_heading(text: str) -> str:
-    return re.sub(r"\s+", "", str(text or "")).lower()
+    return re.sub(r"[\s:：・･_\-ー－]+", "", str(text or "")).lower()
 
 
 def _drop_duplicate_title_heading(lines: list[str], title: str) -> list[str]:
@@ -315,16 +316,31 @@ def _sanitize_attr(value: str) -> str:
     )
 
 
-def _image_html_lines(images: list[NotionImage]) -> list[str]:
+def _body_image_items(images: list[NotionImage]) -> list[dict[str, str]]:
+    return [
+        {
+            "marker": BODY_IMAGE_MARKER_TEMPLATE.format(index=index),
+            "url": image.url,
+            "caption": image.caption,
+        }
+        for index, image in enumerate(images, start=1)
+    ]
+
+
+def _body_image_marker_lines(body_images: list[dict[str, str]]) -> list[str]:
     lines: list[str] = []
-    for index, image in enumerate(images, start=1):
-        alt = image.caption or f"Notion本文画像{index}"
-        lines.extend(["", f'<img src="{_sanitize_attr(image.url)}" alt="{_sanitize_attr(alt)}">'])
+    for image in body_images:
+        marker = str(image.get("marker") or "").strip()
+        if marker:
+            lines.extend(["", marker])
     return lines
 
 
-def _insert_images_after_executive_summary(markdown: str, images: list[NotionImage]) -> str:
-    if not images:
+def _insert_body_image_markers_after_executive_summary(
+    markdown: str,
+    body_images: list[dict[str, str]],
+) -> str:
+    if not body_images:
         return markdown
 
     lines = markdown.replace("\r\n", "\n").replace("\r", "\n").split("\n")
@@ -342,7 +358,7 @@ def _insert_images_after_executive_summary(markdown: str, images: list[NotionIma
 
     while target_index > 0 and not lines[target_index - 1].strip():
         target_index -= 1
-    insert_lines = _image_html_lines(images)
+    insert_lines = _body_image_marker_lines(body_images)
     updated = lines[:target_index] + insert_lines + [""] + lines[target_index:]
     return "\n".join(updated).strip() + "\n"
 
@@ -441,8 +457,8 @@ def build_markdown_from_notion(client: NotionClient, page_id: str) -> tuple[str,
     lines = _drop_duplicate_title_heading(lines, title)
     body = "\n".join(lines).strip()
     body = _strip_frontmatter(body)
-    body_images = images[1:] if len(images) > 1 else []
-    body = _insert_images_after_executive_summary(body, body_images)
+    body_images = _body_image_items(images[1:] if len(images) > 1 else [])
+    body = _insert_body_image_markers_after_executive_summary(body, body_images)
 
     top_image = images[0] if images else _page_cover_image(page)
     output_lines = [f"# {title}", ""]
@@ -456,6 +472,7 @@ def build_markdown_from_notion(client: NotionClient, page_id: str) -> tuple[str,
         "youtube_url": youtube_url,
         "image_count": len(images),
         "body_image_count": len(body_images),
+        "body_images": body_images,
         "top_image_url": top_image.url if top_image else "",
     }
 
@@ -475,7 +492,7 @@ def _write_temp_image(data: bytes, suffix: str) -> Path:
     return Path(handle.name)
 
 
-def _download_image(source: str) -> tuple[Path | None, str]:
+def _download_image(source: str, label: str = "画像") -> tuple[Path | None, str]:
     if not source:
         return None, ""
     if source.startswith("data:"):
@@ -485,19 +502,53 @@ def _download_image(source: str) -> tuple[Path | None, str]:
         mime_type, encoded = match.groups()
         return _write_temp_image(base64.b64decode(encoded), _suffix_from_mime_or_url(mime_type, "")), source
     if source.startswith("blob:"):
-        print(f"   [警告] blob画像はGitHub Actionsから参照できないため、トップ画像をスキップします: {source}")
+        print(f"   [警告] blob画像はGitHub Actionsから参照できないため、{label}をスキップします: {source}")
         return None, source
     try:
         response = requests.get(source, timeout=60, headers={"User-Agent": "Mozilla/5.0"})
         response.raise_for_status()
         content_type = response.headers.get("content-type", "")
         if content_type and not content_type.lower().startswith("image/"):
-            print(f"   [警告] トップ画像URLのContent-Typeが画像ではありません: {content_type}")
+            print(f"   [警告] {label}URLのContent-Typeが画像ではありません: {content_type}")
             return None, source
         return _write_temp_image(response.content, _suffix_from_mime_or_url(content_type, source)), source
     except Exception as exc:
-        print(f"   [警告] トップ画像の取得に失敗しました: {source} / {exc}")
+        print(f"   [警告] {label}の取得に失敗しました: {source} / {exc}")
         return None, source
+
+
+def _download_body_images(body_images: list[dict[str, str]]) -> tuple[list[dict[str, str]], list[str]]:
+    uploads: list[dict[str, str]] = []
+    sources: list[str] = []
+    for index, image in enumerate(body_images, start=1):
+        source = str(image.get("url") or "")
+        image_path, resolved_source = _download_image(source, label=f"本文画像{index}")
+        sources.append(resolved_source)
+        if not image_path:
+            continue
+        uploads.append(
+            {
+                "marker": str(image.get("marker") or ""),
+                "caption": str(image.get("caption") or ""),
+                "source": resolved_source,
+                "path": str(image_path),
+            }
+        )
+    return uploads, sources
+
+
+def _delete_temp_images(paths: list[Path | None]) -> list[str]:
+    deleted: list[str] = []
+    for path in paths:
+        if not path:
+            continue
+        try:
+            if path.exists():
+                path.unlink()
+                deleted.append(str(path))
+        except Exception as exc:
+            print(f"   [警告] 一時画像ファイルの削除に失敗しました: {path} / {exc}")
+    return deleted
 
 
 def _load_note_engine():
@@ -554,8 +605,14 @@ def main() -> int:
     tags = _read_tags(Path(args.tag_file))
 
     top_image_path, top_image_source = (None, "")
+    body_image_uploads: list[dict[str, str]] = []
+    body_image_sources: list[str] = []
+    temp_image_paths: list[Path | None] = []
     if not args.no_top_image and preprocess.get("top_image_url"):
-        top_image_path, top_image_source = _download_image(preprocess["top_image_url"])
+        top_image_path, top_image_source = _download_image(preprocess["top_image_url"], label="トップ画像")
+        temp_image_paths.append(top_image_path)
+    body_image_uploads, body_image_sources = _download_body_images(preprocess.get("body_images") or [])
+    temp_image_paths.extend(Path(item["path"]) for item in body_image_uploads if item.get("path"))
 
     if args.dump_markdown:
         dump_path = Path(args.dump_markdown)
@@ -564,16 +621,22 @@ def main() -> int:
         print(f"   [情報] 整形済みMarkdownを書き出しました: {dump_path}")
 
     note_engine = _load_note_engine()
-    result = note_engine.post_draft_to_note(
-        markdown,
-        run_ogp=not args.no_ogp,
-        run_top_image=bool(top_image_path),
-        insert_toc=not args.no_toc,
-        publish=args.publish or args.dry_run_publish,
-        dry_run_publish=args.dry_run_publish,
-        publish_tags=tags or getattr(note_engine, "NOTE_POST_TAGS", ""),
-        top_image_path=str(top_image_path) if top_image_path else "",
-    )
+    result: dict[str, Any] = {}
+    deleted_temp_images: list[str] = []
+    try:
+        result = note_engine.post_draft_to_note(
+            markdown,
+            run_ogp=not args.no_ogp,
+            run_top_image=bool(top_image_path),
+            insert_toc=not args.no_toc,
+            publish=args.publish or args.dry_run_publish,
+            dry_run_publish=args.dry_run_publish,
+            publish_tags=tags or getattr(note_engine, "NOTE_POST_TAGS", ""),
+            top_image_path=str(top_image_path) if top_image_path else "",
+            body_image_uploads=body_image_uploads,
+        )
+    finally:
+        deleted_temp_images = _delete_temp_images(temp_image_paths)
     result["notion_note_preprocess"] = {
         **preprocess,
         "page_id": page_id,
@@ -584,6 +647,9 @@ def main() -> int:
         "tag_count": len(tags.split()) if tags else 0,
         "top_image_source": top_image_source,
         "top_image_path": str(top_image_path) if top_image_path else "",
+        "body_image_sources": body_image_sources,
+        "body_image_upload_count": len(body_image_uploads),
+        "deleted_temp_image_paths": deleted_temp_images,
     }
     _write_result_json(Path(args.result_json), result)
 

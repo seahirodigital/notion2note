@@ -772,7 +772,7 @@ def _choose_direct_upload_image_file(page, image_path: Path, artifacts_dir: Path
     raise RuntimeError(f"画像アップロード導線を特定できませんでした: {' / '.join(errors[:8])}")
 
 
-def _wait_for_crop_dialog(page):
+def _wait_for_crop_dialog(page, timeout_ms: int = 15000):
     return _find_visible_candidate(
         candidates=[
             ("CropModal__content", page.locator(CROP_DIALOG_SELECTOR)),
@@ -780,12 +780,12 @@ def _wait_for_crop_dialog(page):
             ("role_dialog", page.get_by_role("dialog")),
         ],
         description="画像保存モーダル",
-        timeout_ms=15000,
+        timeout_ms=timeout_ms,
     )
 
 
-def _save_crop_dialog(page) -> str:
-    dialog_strategy, dialog = _wait_for_crop_dialog(page)
+def _save_crop_dialog(page, timeout_ms: int = 15000) -> str:
+    dialog_strategy, dialog = _wait_for_crop_dialog(page, timeout_ms=timeout_ms)
     save_strategy = _click_visible_candidate(
         page,
         candidates=[
@@ -1179,6 +1179,269 @@ def _insert_table_of_contents(page, source_markdown: str = "") -> dict:
         print(f"   ✅ 目次挿入完了: {result['strategy']}")
     else:
         print(f"   ⚠️ 目次挿入を確認できませんでした: {result['strategy']}")
+    return result
+
+
+def _place_caret_at_body_image_marker(page, marker: str) -> dict:
+    """本文内の画像差し込みマーカーを選択状態にする。"""
+    return page.evaluate(
+        """
+        (marker) => {
+          const editor = document.querySelector('.note-editable, [contenteditable="true"]') || document.querySelector('.ProseMirror');
+          if (!editor || !marker) return { ok: false, reason: 'editor_or_marker_empty' };
+          const isVisible = (el) => {
+            const rect = el.getBoundingClientRect();
+            const style = window.getComputedStyle(el);
+            return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+          };
+          const findBlock = (node) => {
+            let current = node && node.parentElement;
+            while (current && current !== editor) {
+              if (/^(P|LI|H[1-6]|DIV)$/i.test(current.tagName || '') || current.getAttribute('data-block-id') || current.getAttribute('data-block')) {
+                return current;
+              }
+              current = current.parentElement;
+            }
+            return node && node.parentElement ? node.parentElement : editor;
+          };
+          const walker = document.createTreeWalker(editor, NodeFilter.SHOW_TEXT, {
+            acceptNode: (node) => {
+              const parent = node.parentElement;
+              if (!parent || !isVisible(parent)) return NodeFilter.FILTER_REJECT;
+              return String(node.nodeValue || '').includes(marker)
+                ? NodeFilter.FILTER_ACCEPT
+                : NodeFilter.FILTER_SKIP;
+            },
+          });
+          const candidates = [];
+          while (walker.nextNode()) {
+            const node = walker.currentNode;
+            const offset = String(node.nodeValue || '').indexOf(marker);
+            if (offset < 0) continue;
+            const block = findBlock(node);
+            const rect = block.getBoundingClientRect();
+            candidates.push({ node, offset, block, rect });
+          }
+          candidates.sort((a, b) => a.rect.top - b.rect.top || a.rect.left - b.rect.left);
+          const target = candidates[0];
+          if (!target) return { ok: false, reason: 'marker_not_found' };
+          target.block.scrollIntoView({ block: 'center', inline: 'nearest' });
+          const range = document.createRange();
+          range.setStart(target.node, target.offset);
+          range.setEnd(target.node, target.offset + marker.length);
+          const selection = window.getSelection();
+          selection.removeAllRanges();
+          selection.addRange(range);
+          editor.focus();
+          return {
+            ok: true,
+            marker,
+            block_text: String(target.block.innerText || target.block.textContent || '').trim(),
+          };
+        }
+        """,
+        marker,
+    )
+
+
+def _click_exact_slash_popup_item(page, label: str, description: str) -> str:
+    result = page.evaluate(
+        """
+        (label) => {
+          const normalize = (value) => (value || '').replace(/\\s+/g, ' ').trim();
+          const isVisible = (el) => {
+            const rect = el.getBoundingClientRect();
+            const style = window.getComputedStyle(el);
+            return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+          };
+          const tagScore = (el) => {
+            const tag = (el.tagName || '').toLowerCase();
+            const role = el.getAttribute('role') || '';
+            if (role === 'menuitem' || role === 'option' || role === 'button' || tag === 'button') return 0;
+            if (tag === 'li') return 1;
+            if (tag === 'div') return 2;
+            return 3;
+          };
+          const findClickTarget = (source) => {
+            const targets = [];
+            let node = source;
+            for (let depth = 0; node && depth < 8; depth += 1, node = node.parentElement) {
+              if (!isVisible(node)) continue;
+              const text = normalize(node.innerText || node.textContent || '');
+              if (text !== label) continue;
+              const tag = (node.tagName || '').toLowerCase();
+              const role = node.getAttribute('role') || '';
+              if (!(tag === 'button' || tag === 'li' || tag === 'div' || role === 'button' || role === 'menuitem' || role === 'option')) continue;
+              const rect = node.getBoundingClientRect();
+              targets.push({
+                el: node,
+                rect,
+                tag,
+                role,
+                score: tagScore(node) + depth / 10,
+              });
+            }
+            targets.sort((a, b) => a.score - b.score || a.rect.top - b.rect.top);
+            return targets[0] || null;
+          };
+          const seen = new Set();
+          const candidates = Array.from(document.querySelectorAll('body *'))
+            .filter(isVisible)
+            .map((source) => {
+              const text = normalize(source.innerText || source.textContent || '');
+              if (text !== label) return null;
+              const target = findClickTarget(source);
+              if (!target || seen.has(target.el)) return null;
+              seen.add(target.el);
+              return target;
+            })
+            .filter(Boolean)
+            .sort((a, b) => a.score - b.score || a.rect.top - b.rect.top || a.rect.left - b.rect.left);
+          const selected = candidates[0];
+          if (!selected) return { ok: false, reason: 'slash_popup_item_not_found' };
+          selected.el.scrollIntoView({ block: 'center', inline: 'nearest' });
+          const rect = selected.el.getBoundingClientRect();
+          return {
+            ok: true,
+            tag: selected.tag,
+            role: selected.role,
+            x: rect.left + Math.min(Math.max(rect.width * 0.35, 32), Math.max(rect.width - 8, 1)),
+            y: rect.top + rect.height / 2,
+          };
+        }
+        """,
+        label,
+    )
+    if not result.get("ok"):
+        raise RuntimeError(f"{description}を特定できません: {result.get('reason', '')}")
+    page.mouse.click(result["x"], result["y"])
+    page.wait_for_timeout(1200)
+    return f"slash_popup_click:{label}:{result.get('tag', '')}:{result.get('role', '')}"
+
+
+def _choose_body_image_file_from_slash_popup(
+    page,
+    image_path: Path,
+    artifacts_dir: Path | None,
+    marker: str,
+) -> str:
+    page.keyboard.type("/")
+    page.wait_for_timeout(1000)
+    click_strategy = ""
+    filechooser_error = ""
+    try:
+        with page.expect_file_chooser(timeout=4000) as chooser_info:
+            click_strategy = _click_exact_slash_popup_item(page, "画像", "本文画像メニュー")
+        chooser_info.value.set_files(str(image_path))
+        page.wait_for_timeout(1500)
+        return f"{click_strategy}:filechooser"
+    except Exception as exc:
+        filechooser_error = str(exc)
+
+    direct_input = _wait_for_existing_file_input_any_scope(
+        page,
+        image_path,
+        timeout_ms=5000,
+        poll_ms=250,
+    )
+    if direct_input:
+        return f"{click_strategy or 'slash_popup'}:input:{direct_input}"
+
+    try:
+        upload_entry = _choose_direct_upload_image_file(page, image_path, artifacts_dir=artifacts_dir)
+        return f"{click_strategy or 'slash_popup'}:upload_entry:{upload_entry}"
+    except Exception as exc:
+        raise RuntimeError(
+            f"本文画像アップロード導線を特定できませんでした: marker={marker} / "
+            f"filechooser={filechooser_error} / upload={exc}"
+        ) from exc
+
+
+def _save_optional_body_image_crop_dialog(page) -> str:
+    try:
+        return _save_crop_dialog(page, timeout_ms=2500)
+    except Exception:
+        return "no_crop_dialog"
+
+
+def _attach_body_images_to_page(
+    page,
+    body_image_uploads: list[dict] | None,
+    artifacts_dir: Path | None,
+) -> dict:
+    uploads = body_image_uploads or []
+    result = {
+        "success": True,
+        "requested_count": len(uploads),
+        "uploaded_count": 0,
+        "items": [],
+        "failures": [],
+    }
+    if not uploads:
+        result["strategy"] = "no_body_images"
+        return result
+
+    print(f"   🖼️ Notion本文画像をnote画像ブロックとして添付します: {len(uploads)}件")
+    for index, item in enumerate(uploads, start=1):
+        marker = str(item.get("marker") or "")
+        image_path = Path(str(item.get("path") or ""))
+        item_result = {
+            "index": index,
+            "marker": marker,
+            "path": str(image_path),
+            "source": str(item.get("source") or ""),
+            "success": False,
+        }
+        try:
+            if not marker:
+                raise RuntimeError("本文画像マーカーが空です")
+            if not image_path.exists():
+                raise FileNotFoundError(f"本文画像の一時ファイルが見つかりません: {image_path}")
+
+            marker_result = _place_caret_at_body_image_marker(page, marker)
+            item_result["marker_result"] = marker_result
+            if not marker_result.get("ok"):
+                raise RuntimeError(marker_result.get("reason") or "本文画像マーカーを特定できません")
+
+            before_count = _count_page_images(page)
+            item_result["before_image_count"] = before_count
+            page.keyboard.press("Backspace")
+            page.wait_for_timeout(500)
+
+            upload_strategy = _choose_body_image_file_from_slash_popup(
+                page,
+                image_path,
+                artifacts_dir=artifacts_dir,
+                marker=marker,
+            )
+            item_result["upload_strategy"] = upload_strategy
+            item_result["crop_dialog_strategy"] = _save_optional_body_image_crop_dialog(page)
+
+            ready_image_count, ready_wait_strategy = _wait_for_uploaded_image_ready(
+                page,
+                previous_count=before_count,
+                timeout_sec=60,
+            )
+            item_result["after_ready_image_count"] = ready_image_count
+            item_result["ready_wait_strategy"] = ready_wait_strategy
+            if ready_image_count <= before_count:
+                raise RuntimeError("本文画像の挿入完了を確認できませんでした")
+
+            item_result["success"] = True
+            result["uploaded_count"] += 1
+            print(f"   ✅ 本文画像添付完了: {index}/{len(uploads)}")
+            page.wait_for_timeout(800)
+        except Exception as exc:
+            item_result["error"] = str(exc)
+            result["success"] = False
+            result["failures"].append(item_result)
+            print(f"   ⚠️ 本文画像添付に失敗しました: {index}/{len(uploads)} / {exc}")
+            try:
+                page.keyboard.press("Escape")
+            except Exception:
+                pass
+        result["items"].append(item_result)
+
     return result
 
 
@@ -2503,12 +2766,6 @@ def markdown_to_note_html(md: str) -> str:
             i += 1
             continue
 
-        # 画像HTML単独行 → 通常段落の文字列にせず、本文画像として渡す
-        if re.match(r'^<img\b[^>]*>\s*$', stripped, flags=re.IGNORECASE):
-            html_parts.append(stripped)
-            i += 1
-            continue
-
         # 通常段落
         text = _inline_format(stripped)
         html_parts.append(f'<p>{text}</p>')
@@ -2786,6 +3043,7 @@ def _run_ogp_expansion_on_draft(
     publish_tags: str = NOTE_POST_TAGS,
     artifacts_dir: Path | None = None,
     top_image_path: str = "",
+    body_image_uploads: list[dict] | None = None,
 ) -> dict:
     """
     下書き作成後のエディタURLへPlaywrightでアクセスし、OGP展開とトップ画像処理を実行する。
@@ -2798,6 +3056,7 @@ def _run_ogp_expansion_on_draft(
         "editor_url": editor_url,
         "ogp_processed_count": 0,
         "toc": {},
+        "body_images": {},
         "top_image": {},
         "publish": {},
         "success": False,
@@ -2861,6 +3120,16 @@ def _run_ogp_expansion_on_draft(
         else:
             result["toc"] = {"success": False, "strategy": "skipped_by_option"}
             print("   ⏭️ 目次挿入はオプション指定によりスキップします")
+
+        try:
+            result["body_images"] = _attach_body_images_to_page(
+                page,
+                body_image_uploads=body_image_uploads,
+                artifacts_dir=artifacts_dir,
+            )
+        except Exception as e:
+            result["body_images"] = {"success": False, "error": str(e)}
+            print(f"   ⚠️ 本文画像添付エラー: {e}")
 
         if run_top_image:
             if top_image_path:
@@ -3219,6 +3488,7 @@ def post_draft_to_note(
     dry_run_publish: bool = False,
     publish_tags: str = NOTE_POST_TAGS,
     top_image_path: str = "",
+    body_image_uploads: list[dict] | None = None,
 ) -> dict:
     title, body = extract_title_and_body(markdown)
     if not title or not body:
@@ -3278,6 +3548,7 @@ def post_draft_to_note(
             dry_run_publish=dry_run_publish,
             publish_tags=publish_tags,
             top_image_path=top_image_path,
+            body_image_uploads=body_image_uploads,
         )
         result["editor_result"] = editor_result
         publish_result = editor_result.get("publish") or {}

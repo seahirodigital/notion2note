@@ -12,6 +12,11 @@ const DEFAULTS = {
 
 const TEXT_KEYS = ["owner", "repo", "workflow", "ref", "token", "pageUrl"];
 const CHECK_KEYS = ["publish", "dryRunPublish", "noTopImage"];
+const ONEDRIVE_REPO_DIR = "C:\\Users\\mahha\\OneDrive\\開発\\notion2note";
+const QUICK_LINK_PATHS = {
+  affiliate: `${ONEDRIVE_REPO_DIR}\\affiliate_links.txt`,
+  tag: `${ONEDRIVE_REPO_DIR}\\tag.md`,
+};
 
 const fields = {
   owner: document.getElementById("owner"),
@@ -72,16 +77,20 @@ function isNotionUrl(url) {
   }
 }
 
+function localFileHref(path) {
+  const normalized = String(path || "").replace(/\\/g, "/");
+  const parts = normalized.split("/");
+  const encodedPath = parts
+    .map((part, index) => (index === 0 ? part : encodeURIComponent(part)))
+    .join("/");
+  return `file:///${encodedPath}`;
+}
+
 function updateQuickLinks() {
-  const owner = fields.owner.value.trim() || DEFAULTS.owner;
-  const repo = fields.repo.value.trim() || DEFAULTS.repo;
-  const ref = fields.ref.value.trim() || DEFAULTS.ref;
-  const refPath = encodeURIComponent(ref).replace(/%2F/g, "/");
-  const baseUrl = `https://github.com/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/blob/${refPath}`;
-  fields.affiliateLink.href = `${baseUrl}/affiliate_links.txt`;
-  fields.affiliateLink.title = `アフィリエイトリンクファイルを開く: ${fields.affiliateLink.href}`;
-  fields.tagLink.href = `${baseUrl}/tag.md`;
-  fields.tagLink.title = `タグファイルを開く: ${fields.tagLink.href}`;
+  fields.affiliateLink.href = localFileHref(QUICK_LINK_PATHS.affiliate);
+  fields.affiliateLink.title = `アフィリエイトリンクファイルを開く: ${QUICK_LINK_PATHS.affiliate}`;
+  fields.tagLink.href = localFileHref(QUICK_LINK_PATHS.tag);
+  fields.tagLink.title = `タグファイルを開く: ${QUICK_LINK_PATHS.tag}`;
 }
 
 async function refreshCurrentTabUrl(force = false) {

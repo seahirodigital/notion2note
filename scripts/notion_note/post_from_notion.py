@@ -334,7 +334,7 @@ def _is_h2_line(line: str) -> bool:
 
 
 def _clean_h2_title(line_or_title: str) -> str:
-    title = re.sub(r"^##\s+", "", str(line_or_title or "").strip())
+    title = re.sub(r"^#{2,6}\s+", "", str(line_or_title or "").strip())
     title = re.sub(r"<[^>]+>", "", title).strip()
     title = re.sub(r"^[A-CＡ-Ｃa-cａ-ｃ]\s*[:：.\-・]\s*", "", title).strip()
     return title
@@ -344,11 +344,27 @@ def _article_section_kind(title: str) -> str:
     normalized = re.sub(r"[\s:：・･_\-ー－]+", "", _clean_h2_title(title)).lower()
     if "エグゼクティブサマリ" in normalized or "executivesummary" in normalized:
         return "executive"
-    if "インサイトまとめ" in normalized or "insight" in normalized:
+    if "インサイト" in normalized or "insight" in normalized:
         return "insight"
     if "詳細情報" in normalized or "詳細" in normalized or "detail" in normalized:
         return "detail"
+    if normalized == "まとめ" or normalized.endswith("まとめ"):
+        return "insight"
     return "other"
+
+
+def _has_top_section_prefix(line_or_title: str) -> bool:
+    title = re.sub(r"^#{2,6}\s+", "", str(line_or_title or "").strip())
+    return bool(re.match(r"^[A-CＡ-Ｃa-cａ-ｃ]\s*[:：.\-・]", title))
+
+
+def _is_section_boundary_line(line: str) -> bool:
+    stripped = str(line or "").strip()
+    if _is_h2_line(stripped):
+        return True
+    if not stripped.startswith("### "):
+        return False
+    return _article_section_kind(stripped) in {"executive", "insight", "detail"} and _has_top_section_prefix(stripped)
 
 
 def _is_plain_youtube_line(line: str) -> bool:
@@ -365,7 +381,7 @@ def _article_sections(markdown: str) -> tuple[list[str], list[dict[str, Any]]]:
     sections: list[dict[str, Any]] = []
     current: dict[str, Any] | None = None
     for line in str(markdown or "").replace("\r\n", "\n").replace("\r", "\n").split("\n"):
-        if _is_h2_line(line):
+        if _is_section_boundary_line(line):
             if current is not None:
                 current["lines"] = _trim_blank_lines(current["lines"])
                 sections.append(current)
@@ -478,9 +494,9 @@ def _build_article_template(
 
     output_lines = [f"# {title}"]
     _append_template_lines(output_lines, executive_lines)
+    _append_template_lines(output_lines, _body_image_marker_lines(body_images))
     if youtube_url:
         _append_template_lines(output_lines, [youtube_url])
-    _append_template_lines(output_lines, _body_image_marker_lines(body_images))
     _append_template_lines(output_lines, [AFFILIATE_SLOT_TEMPLATE.format(index=1)])
     _append_template_lines(output_lines, [TOC_MARKER])
     _append_template_lines(output_lines, [DISCLOSURE_TEXT])

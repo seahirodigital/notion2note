@@ -84,6 +84,8 @@ NOTE_POST_TAGS = (
 NOTE_PUBLISH_SETTINGS_READY_TIMEOUT_MS = int(os.getenv("NOTE_PUBLISH_SETTINGS_READY_TIMEOUT_MS", "45000"))
 NOTE_PUBLISH_SETTINGS_READY_POLL_MS = int(os.getenv("NOTE_PUBLISH_SETTINGS_READY_POLL_MS", "500"))
 NOTE_PUBLISH_MAGAZINE_NAME = os.getenv("NOTE_PUBLISH_MAGAZINE_NAME", "投資Youtube学習記録")
+NOTE_PUBLISH_COMPLETE_TIMEOUT_MS = int(os.getenv("NOTE_PUBLISH_COMPLETE_TIMEOUT_MS", "90000"))
+NOTE_PUBLISH_COMPLETE_POLL_MS = int(os.getenv("NOTE_PUBLISH_COMPLETE_POLL_MS", "1000"))
 
 EDITOR_CONTENT_SELECTOR  = ".ProseMirror p, .ProseMirror h2, .ProseMirror h3"
 EDITOR_LOAD_TIMEOUT_SEC  = 60
@@ -2068,6 +2070,161 @@ def _add_publish_magazine(page) -> str:
     return f"{tab_strategy}->{strategy}" if tab_strategy else strategy
 
 
+def _extract_note_key_from_url(url: str) -> str:
+    match = re.search(r"/(?:notes/|n/)?(n[0-9a-f]{8,})(?:[/?#]|$)", url or "", re.IGNORECASE)
+    return match.group(1) if match else ""
+
+
+def _is_editor_publish_url(url: str) -> bool:
+    if not url:
+        return False
+    parsed = urlparse(url)
+    return parsed.netloc == "editor.note.com" or "/publish" in parsed.path
+
+
+def _is_public_note_url(url: str, note_key: str = "") -> bool:
+    if not url:
+        return False
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"}:
+        return False
+    if parsed.netloc == "editor.note.com":
+        return False
+    if parsed.netloc != "note.com" and not parsed.netloc.endswith(".note.com"):
+        return False
+    if "/publish" in parsed.path:
+        return False
+    if note_key and note_key not in url:
+        return False
+    if not note_key and not _extract_note_key_from_url(url):
+        return False
+    return True
+
+
+def _collect_published_note_url_candidates(page, note_key: str = "") -> list[str]:
+    try:
+        candidates = page.evaluate(
+            """
+            ({ noteKey }) => {
+              const urls = [];
+              const add = (value) => {
+                if (!value) return;
+                try {
+                  urls.push(new URL(value, location.href).href);
+                } catch {}
+              };
+              add(location.href);
+              for (const selector of [
+                'link[rel="canonical"]',
+                'meta[property="og:url"]',
+                'meta[name="twitter:url"]',
+                'meta[name="citation_public_url"]',
+              ]) {
+                for (const el of document.querySelectorAll(selector)) {
+                  add(el.getAttribute('href') || el.getAttribute('content'));
+                }
+              }
+              for (const anchor of document.querySelectorAll('a[href]')) {
+                const text = (anchor.innerText || anchor.textContent || anchor.getAttribute('aria-label') || '').trim();
+                const href = anchor.getAttribute('href') || '';
+                if (
+                  href.includes('note.com') ||
+                  (noteKey && href.includes(noteKey)) ||
+                  /記事|公開|表示|見る|確認/.test(text)
+                ) {
+                  add(href);
+                }
+              }
+              return Array.from(new Set(urls));
+            }
+            """,
+            {"noteKey": note_key},
+        )
+    except Exception as exc:
+        print(f"   ⚠️ 公開済みURL候補の取得に失敗しました: {exc}")
+        return []
+    return [str(url) for url in candidates if _is_public_note_url(str(url), note_key)]
+
+
+def _published_page_looks_available(page) -> bool:
+    try:
+        status = page.evaluate(
+            """
+            () => {
+              const text = ((document.body && document.body.innerText) || '').replace(/\\s+/g, ' ').trim();
+              const unavailableWords = [
+                '記事が見つかりません',
+                'ページが見つかりません',
+                'お探しの記事は見つかりません',
+                '存在しません',
+                '非公開',
+                '削除されました',
+              ];
+              return {
+                ok: text.length > 0 && !unavailableWords.some((word) => text.includes(word)),
+                sampleText: text.slice(0, 200),
+              };
+            }
+            """
+        )
+    except Exception as exc:
+        print(f"   ⚠️ 公開ページ確認に失敗しました: {exc}")
+        return False
+    if not status.get("ok"):
+        print(f"   ⚠️ 公開ページとして確認できません: {status.get('sampleText', '')}")
+    return bool(status.get("ok"))
+
+
+def _wait_for_published_note_url(page, note_key: str = "") -> dict:
+    started_at = time.monotonic()
+    deadline = started_at + (NOTE_PUBLISH_COMPLETE_TIMEOUT_MS / 1000)
+    last_url = page.url
+
+    while time.monotonic() < deadline:
+        last_url = page.url
+        if _is_public_note_url(last_url, note_key):
+            if _published_page_looks_available(page):
+                elapsed = time.monotonic() - started_at
+                return {"url": last_url, "strategy": f"page_url_after_{elapsed:.1f}s"}
+
+        candidates = _collect_published_note_url_candidates(page, note_key)
+        if candidates:
+            elapsed = time.monotonic() - started_at
+            return {"url": candidates[0], "strategy": f"dom_url_candidate_after_{elapsed:.1f}s"}
+
+        page.wait_for_timeout(max(250, NOTE_PUBLISH_COMPLETE_POLL_MS))
+
+    if note_key:
+        landing_url = f"https://note.com/notes/{note_key}/landing"
+        print(f"   🔎 公開済みURLを直接確認します: {landing_url}")
+        try:
+            page.goto(landing_url, wait_until="domcontentloaded", timeout=20_000)
+            try:
+                page.wait_for_load_state("networkidle", timeout=10_000)
+            except Exception:
+                pass
+            page.wait_for_timeout(1500)
+            if _is_public_note_url(page.url, note_key) and _published_page_looks_available(page):
+                return {"url": page.url, "strategy": "landing_url_probe"}
+            candidates = _collect_published_note_url_candidates(page, note_key)
+            if candidates:
+                return {"url": candidates[0], "strategy": "landing_dom_url_candidate"}
+        except Exception as exc:
+            print(f"   ⚠️ 公開済みURLの直接確認に失敗しました: {exc}")
+
+    if NOTE_TOP_IMAGE_DEBUG:
+        _dump_page_artifacts(page, NOTE_TOP_IMAGE_ARTIFACTS_DIR, "publish_completion_timeout")
+        _write_json(
+            NOTE_TOP_IMAGE_ARTIFACTS_DIR / "publish_completion_timeout.json",
+            {"last_url": last_url, "note_key": note_key},
+        )
+    raise RuntimeError(
+        "公開完了URLを確認できませんでした。"
+        f"最後のURLは {last_url} です。"
+        "editor.note.com の公開設定画面に留まっている可能性があります。"
+    )
+
+
 
 def _click_final_post_button(page, dry_run: bool = False) -> str:
     if dry_run:
@@ -2099,6 +2256,7 @@ def _click_final_post_button(page, dry_run: bool = False) -> str:
 
 
 def _publish_editor_page(page, tags: str = NOTE_POST_TAGS, dry_run: bool = False) -> dict:
+    note_key = _extract_note_key_from_url(page.url)
     result = {
         "success": False,
         "publish_next_strategy": "",
@@ -2106,7 +2264,9 @@ def _publish_editor_page(page, tags: str = NOTE_POST_TAGS, dry_run: bool = False
         "tag_strategy": "",
         "magazine_strategy": "",
         "post_strategy": "",
+        "publish_complete_strategy": "",
         "final_url": "",
+        "note_key": note_key,
         "dry_run": dry_run,
     }
     result["publish_next_strategy"] = _click_publish_next(page)
@@ -2114,8 +2274,14 @@ def _publish_editor_page(page, tags: str = NOTE_POST_TAGS, dry_run: bool = False
     result["tag_strategy"] = _fill_note_hashtags(page, tags)
     result["magazine_strategy"] = _add_publish_magazine(page)
     result["post_strategy"] = _click_final_post_button(page, dry_run=dry_run)
-    page.wait_for_timeout(5000)
-    result["final_url"] = page.url
+    if dry_run:
+        page.wait_for_timeout(1000)
+        result["final_url"] = page.url
+        result["publish_complete_strategy"] = "dry_run"
+    else:
+        completion = _wait_for_published_note_url(page, note_key)
+        result["final_url"] = completion["url"]
+        result["publish_complete_strategy"] = completion["strategy"]
     result["success"] = True
     print(f"   ✅ 公開投稿フロー完了: {result['final_url']}")
     return result

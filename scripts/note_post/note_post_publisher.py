@@ -12,6 +12,7 @@ import sys
 import tempfile
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import requests
 
@@ -60,6 +61,19 @@ def _build_discord_x_template(note_url: str) -> str:
     return f"【投資Youtube記録】\n\n{note_url}\n\n{DISCORD_X_TEMPLATE_TAGS}"
 
 
+def _is_public_note_url(note_url: str) -> bool:
+    parsed = urlparse(note_url or "")
+    if parsed.scheme not in {"http", "https"}:
+        return False
+    if parsed.netloc == "editor.note.com":
+        return False
+    if parsed.netloc != "note.com" and not parsed.netloc.endswith(".note.com"):
+        return False
+    if "/publish" in parsed.path:
+        return False
+    return bool(re.search(r"/(?:notes/|n/)?n[0-9a-f]{8,}(?:[/?#]|$)", note_url or "", re.IGNORECASE))
+
+
 def notify_discord_after_publish(note_url: str) -> dict[str, Any]:
     status: dict[str, Any] = {
         "attempted": False,
@@ -70,6 +84,10 @@ def notify_discord_after_publish(note_url: str) -> dict[str, Any]:
     }
     if not note_url:
         status["error"] = "公開後URLが空のためDiscord通知をスキップしました。"
+        print(f"   [警告] {status['error']}")
+        return status
+    if not _is_public_note_url(note_url):
+        status["error"] = f"公開済みURLではないためDiscord通知をスキップしました: {note_url}"
         print(f"   [警告] {status['error']}")
         return status
     if not DISCORD_WEBHOOK_URL:
@@ -120,7 +138,19 @@ def publish_markdown_to_note(
         body_image_uploads=body_image_uploads,
     )
     if not dry_run_publish and result.get("success"):
-        result["discord_notification"] = notify_discord_after_publish(str(result.get("published_url") or ""))
+        published_url = str(result.get("published_url") or "")
+        if not _is_public_note_url(published_url):
+            result["success"] = False
+            result["publish_url_error"] = f"公開済みURLを確認できませんでした: {published_url}"
+            result["discord_notification"] = {
+                "attempted": False,
+                "success": False,
+                "webhook_configured": bool(DISCORD_WEBHOOK_URL),
+                "url": published_url,
+                "error": result["publish_url_error"],
+            }
+            return result
+        result["discord_notification"] = notify_discord_after_publish(published_url)
     else:
         result["discord_notification"] = {
             "attempted": False,

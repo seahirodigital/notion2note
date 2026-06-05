@@ -21,6 +21,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 NOTE_ENGINE_PATH = REPO_ROOT / "scripts" / "note_engine" / "note_draft_poster.py"
 TAG_FILE = REPO_ROOT / "tag.md"
 DEFAULT_RESULT_JSON = Path(tempfile.gettempdir()) / "note_post_result.json"
+NOTE_PUBLISH_MAX_TAGS = int(os.getenv("NOTE_PUBLISH_MAX_TAGS", "98"))
 DISCORD_WEBHOOK_URL = os.getenv("NOTION2NOTE_DISCORD_WEBHOOK", "").strip()
 DISCORD_X_TEMPLATE_TAGS = "#投資初心者 #投資 #デイトレ #日本株 #日経平均 #米国株 #高配当 #FX #ドル円"
 HTTP_UA = (
@@ -53,7 +54,14 @@ def _read_tags(path: Path) -> str:
             cleaned = token.strip().lstrip("#")
             if cleaned:
                 tags.append(cleaned)
-    return " ".join(dict.fromkeys(tags))
+    unique_tags = list(dict.fromkeys(tags))
+    if NOTE_PUBLISH_MAX_TAGS > 0 and len(unique_tags) > NOTE_PUBLISH_MAX_TAGS:
+        print(
+            "   [情報] note投稿タグを先頭から"
+            f"{NOTE_PUBLISH_MAX_TAGS}件に制限します: {len(unique_tags)}件 → {NOTE_PUBLISH_MAX_TAGS}件"
+        )
+        unique_tags = unique_tags[:NOTE_PUBLISH_MAX_TAGS]
+    return " ".join(unique_tags)
 
 
 def _write_result_json(path: Path, payload: dict[str, Any]) -> None:

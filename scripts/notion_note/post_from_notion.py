@@ -28,6 +28,7 @@ NOTE_POST_PUBLISHER_PATH = REPO_ROOT / "scripts" / "note_post" / "note_post_publ
 AFFILIATE_FILE = REPO_ROOT / "affiliate_links.txt"
 TAG_FILE = REPO_ROOT / "tag.md"
 DEFAULT_RESULT_JSON = Path(tempfile.gettempdir()) / "notion_note_result.json"
+NOTE_PUBLISH_MAX_TAGS = int(os.getenv("NOTE_PUBLISH_MAX_TAGS", "98"))
 
 NOTION_API_BASE = "https://api.notion.com/v1"
 NOTION_VERSION = os.getenv("NOTION_VERSION", "2022-06-28")
@@ -612,7 +613,14 @@ def _read_tags(path: Path) -> str:
             cleaned = token.strip().lstrip("#")
             if cleaned:
                 tags.append(cleaned)
-    return " ".join(dict.fromkeys(tags))
+    unique_tags = list(dict.fromkeys(tags))
+    if NOTE_PUBLISH_MAX_TAGS > 0 and len(unique_tags) > NOTE_PUBLISH_MAX_TAGS:
+        print(
+            "   [情報] note投稿タグを先頭から"
+            f"{NOTE_PUBLISH_MAX_TAGS}件に制限します: {len(unique_tags)}件 → {NOTE_PUBLISH_MAX_TAGS}件"
+        )
+        unique_tags = unique_tags[:NOTE_PUBLISH_MAX_TAGS]
+    return " ".join(unique_tags)
 
 
 def _page_cover_image(page: dict[str, Any]) -> NotionImage | None:

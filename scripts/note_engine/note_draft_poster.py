@@ -86,6 +86,7 @@ NOTE_PUBLISH_SETTINGS_READY_POLL_MS = int(os.getenv("NOTE_PUBLISH_SETTINGS_READY
 NOTE_PUBLISH_MAGAZINE_NAME = os.getenv("NOTE_PUBLISH_MAGAZINE_NAME", "投資Youtube学習記録")
 NOTE_PUBLISH_COMPLETE_TIMEOUT_MS = int(os.getenv("NOTE_PUBLISH_COMPLETE_TIMEOUT_MS", "90000"))
 NOTE_PUBLISH_COMPLETE_POLL_MS = int(os.getenv("NOTE_PUBLISH_COMPLETE_POLL_MS", "1000"))
+NOTE_PUBLISH_MAX_TAGS = int(os.getenv("NOTE_PUBLISH_MAX_TAGS", "98"))
 
 EDITOR_CONTENT_SELECTOR  = ".ProseMirror p, .ProseMirror h2, .ProseMirror h3"
 EDITOR_LOAD_TIMEOUT_SEC  = 60
@@ -1735,6 +1736,33 @@ def _verify_note_hashtags(page, tags: str) -> dict:
     )
 
 
+def _limit_publish_tags(tags: str) -> tuple[str, dict]:
+    raw_tags = []
+    for token in re.split(r"[\s,、]+", tags or ""):
+        cleaned = token.strip().lstrip("#")
+        if cleaned:
+            raw_tags.append(cleaned)
+
+    unique_tags = list(dict.fromkeys(raw_tags))
+    limited_tags = unique_tags
+    if NOTE_PUBLISH_MAX_TAGS > 0:
+        limited_tags = unique_tags[:NOTE_PUBLISH_MAX_TAGS]
+
+    status = {
+        "raw_count": len(raw_tags),
+        "unique_count": len(unique_tags),
+        "used_count": len(limited_tags),
+        "limit": NOTE_PUBLISH_MAX_TAGS,
+        "truncated_count": max(0, len(unique_tags) - len(limited_tags)),
+    }
+    if status["truncated_count"]:
+        print(
+            "   [情報] ハッシュタグを先頭から"
+            f"{NOTE_PUBLISH_MAX_TAGS}件に制限します: {len(unique_tags)}件 → {len(limited_tags)}件"
+        )
+    return " ".join(limited_tags), status
+
+
 def _get_publish_settings_ready_state(page) -> dict:
     try:
         return page.evaluate(
@@ -2366,6 +2394,12 @@ def _capture_publish_response_summary(response, note_key: str = "") -> dict | No
             "note_key": note_key,
             "note_key_match": bool(not note_key or note_key in url),
         }
+        if not response.ok:
+            try:
+                body = response.text() or ""
+                summary["body_preview"] = body[:500]
+            except Exception as exc:
+                summary["body_preview_error"] = str(exc)
         return summary
     except Exception as exc:
         return {"error": str(exc)}
@@ -2467,11 +2501,13 @@ def _click_final_post_button(page, note_key: str = "", dry_run: bool = False) ->
 
 def _publish_editor_page(page, tags: str = NOTE_POST_TAGS, dry_run: bool = False) -> dict:
     note_key = _extract_note_key_from_url(page.url)
+    limited_tags, tag_limit = _limit_publish_tags(tags)
     result = {
         "success": False,
         "publish_next_strategy": "",
         "publish_settings_ready_strategy": "",
         "tag_strategy": "",
+        "tag_limit": tag_limit,
         "magazine_strategy": "",
         "post_strategy": "",
         "publish_complete_strategy": "",
@@ -2481,7 +2517,7 @@ def _publish_editor_page(page, tags: str = NOTE_POST_TAGS, dry_run: bool = False
     }
     result["publish_next_strategy"] = _click_publish_next(page)
     result["publish_settings_ready_strategy"] = _wait_for_publish_settings_ready(page)
-    result["tag_strategy"] = _fill_note_hashtags(page, tags)
+    result["tag_strategy"] = _fill_note_hashtags(page, limited_tags)
     result["magazine_strategy"] = _add_publish_magazine(page)
     post_result = _click_final_post_button(page, note_key=note_key, dry_run=dry_run)
     result["post_strategy"] = post_result.get("strategy", "")

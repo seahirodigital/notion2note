@@ -188,6 +188,7 @@ jobs:
 
       - name: Notion記事をnoteへ投稿
         if: ${{ steps.schedule_gate.outputs.skip != 'true' }}
+        timeout-minutes: 8
         env:
           NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
           GITHUB_TOKEN: ${{ secrets.GH_PAT }}

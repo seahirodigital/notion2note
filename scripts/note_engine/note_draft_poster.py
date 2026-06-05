@@ -89,7 +89,7 @@ NOTE_PUBLISH_COMPLETE_POLL_MS = int(os.getenv("NOTE_PUBLISH_COMPLETE_POLL_MS", "
 NOTE_PUBLISH_MAX_TAGS = int(os.getenv("NOTE_PUBLISH_MAX_TAGS", "98"))
 NOTE_CLOUDFRONT_RETRY_DELAYS = tuple(
     int(part.strip())
-    for part in os.getenv("NOTE_CLOUDFRONT_RETRY_DELAYS", "45,90,180").split(",")
+    for part in os.getenv("NOTE_CLOUDFRONT_RETRY_DELAYS", "").split(",")
     if part.strip()
 )
 
@@ -3779,11 +3779,15 @@ def _create_session(cookies: dict) -> http_requests.Session:
     session = http_requests.Session()
     session.headers.update({
         "User-Agent": UA,
-        "Accept": "application/json",
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "ja-JP,ja;q=0.9,en-US;q=0.8,en;q=0.7",
         "Content-Type": "application/json",
-        "Referer": "https://note.com/",
-        "Origin": "https://note.com",
+        "Referer": "https://editor.note.com/",
+        "Origin": "https://editor.note.com",
         "X-Requested-With": "XMLHttpRequest",
+        "Sec-Fetch-Site": "same-site",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Dest": "empty",
     })
     if cookies:
         session.cookies.update(cookies)
@@ -3981,6 +3985,21 @@ def _xsrf_token(session: http_requests.Session) -> str:
         if cookie.name == "XSRF-TOKEN":
             return _urlparse.unquote(cookie.value)
     return ""
+
+
+def _ensure_xsrf_token(session: http_requests.Session) -> str:
+    xsrf = _xsrf_token(session)
+    if xsrf:
+        return xsrf
+
+    print("   🔐 XSRF-TOKEN未取得 → note.comにアクセスして取得...")
+    try:
+        response = session.get("https://note.com/", timeout=15)
+        if _is_cloudfront_403_response(response):
+            print("   ⚠️ XSRF取得の事前アクセスも CloudFront 403 です")
+    except Exception as exc:
+        print(f"   ⚠️ XSRF取得の事前アクセスに失敗しました: {exc}")
+    return _xsrf_token(session)
 
 
 def _plain_text_length_from_html(body_html: str) -> int:
@@ -4194,10 +4213,25 @@ def _create_draft_api(session: http_requests.Session, title: str, body_html: str
     """
     # ── Step 1: 記事スケルトン作成 ──
     print("   📝 Step1: 記事スケルトン作成...")
+    xsrf = _ensure_xsrf_token(session)
+    create_headers = {
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "ja-JP,ja;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Content-Type": "application/json",
+        "X-Requested-With": "XMLHttpRequest",
+        "Origin": "https://editor.note.com",
+        "Referer": "https://editor.note.com/",
+        "Sec-Fetch-Site": "same-site",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Dest": "empty",
+    }
+    if xsrf:
+        create_headers["X-XSRF-TOKEN"] = xsrf
     res = _post_json_with_cloudfront_retry(
         session,
         f"{NOTE_API_BASE}/v1/text_notes",
         {"template_key": None},
+        headers=create_headers,
         timeout=30,
         label="記事スケルトン作成",
     )
@@ -4222,12 +4256,7 @@ def _create_draft_api(session: http_requests.Session, title: str, body_html: str
 
     # ── Step 2: draft_save で本文保存 ──
     print("   📝 Step2: 本文を draft_save で保存...")
-    xsrf = _xsrf_token(session)
-    if not xsrf:
-        # XSRF-TOKEN がない場合はnote.comにアクセスして取得
-        print("   🔐 XSRF-TOKEN未取得 → note.comにアクセスして取得...")
-        session.get("https://note.com/", timeout=15)
-        xsrf = _xsrf_token(session)
+    xsrf = _ensure_xsrf_token(session)
 
     payload = {
         "body": body_html,

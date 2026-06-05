@@ -2363,12 +2363,31 @@ def _capture_publish_response_summary(response, note_key: str = "") -> dict | No
             "url": url,
             "status": response.status,
             "ok": response.ok,
+            "note_key": note_key,
+            "note_key_match": bool(not note_key or note_key in url),
         }
-        if note_key and note_key not in url:
-            return None
         return summary
     except Exception as exc:
         return {"error": str(exc)}
+
+
+def _click_locator_force_first(page, locator, strategy: str, description: str, timeout_ms: int = 10_000) -> str:
+    locator.scroll_into_view_if_needed()
+    click_errors = []
+    for click_name, clicker in [
+        ("force click", lambda: locator.click(timeout=timeout_ms, force=True)),
+        ("DOM click", lambda: locator.evaluate("(element) => element.click()")),
+        ("通常click", lambda: locator.click(timeout=timeout_ms)),
+    ]:
+        try:
+            clicker()
+            page.wait_for_timeout(1000)
+            print(f"   ✅ {description}: {strategy} ({click_name})")
+            return click_name
+        except Exception as exc:
+            click_errors.append(f"{click_name}={exc}")
+
+    raise RuntimeError(f"{description} の click に失敗しました: {strategy}: {' / '.join(click_errors[:3])}")
 
 
 def _click_final_post_button(page, note_key: str = "", dry_run: bool = False) -> dict:
@@ -2377,6 +2396,7 @@ def _click_final_post_button(page, note_key: str = "", dry_run: bool = False) ->
         return {"strategy": "dry_run", "responses": [], "button_states": []}
 
     responses: list[dict] = []
+    button_state_snapshots: list[dict] = []
 
     def on_response(response):
         summary = _capture_publish_response_summary(response, note_key)
@@ -2388,23 +2408,42 @@ def _click_final_post_button(page, note_key: str = "", dry_run: bool = False) ->
         clicked_strategies: list[str] = []
         button_states: list[dict] = []
         for attempt in range(2):
-            strategy, locator, states = _find_enabled_final_post_button(page)
-            button_states = states
-            locator.scroll_into_view_if_needed()
-            locator.click(timeout=10_000)
-            clicked_strategies.append(strategy)
-            print(f"   ✅ 投稿する: {strategy} (通常click)")
-            page.wait_for_timeout(4500)
+            candidates = [
+                ("role_button_投稿する", page.get_by_role("button", name="投稿する")),
+                ("button_text_投稿する", page.locator("button").filter(has_text="投稿する")),
+            ]
+            if attempt > 0:
+                candidates = list(reversed(candidates))
 
-            visible_enabled = False
+            button_states = _collect_final_post_button_states(page)
+            button_state_snapshots.append({"attempt": attempt + 1, "phase": "before_click", "states": button_states})
             try:
-                _, _, button_states = _find_enabled_final_post_button(page, timeout_ms=1500)
-                visible_enabled = True
-            except Exception:
-                visible_enabled = False
-            if not visible_enabled:
+                strategy, locator = _find_visible_candidate(
+                    candidates,
+                    "投稿する",
+                    timeout_ms=8000 if attempt == 0 else 2500,
+                )
+            except Exception as exc:
+                if attempt == 0:
+                    raise
+                print(f"   ℹ️ 追加の投稿確認ボタンはありませんでした: {exc}")
                 break
-            print("   ℹ️ 投稿確認用の追加ボタンが残っているため、もう一度クリックします")
+
+            if attempt == 0:
+                _click_locator_with_fallback(page, locator, strategy, "投稿する", timeout_ms=10_000)
+                click_method = "fallback_order"
+            else:
+                click_method = _click_locator_force_first(page, locator, strategy, "投稿する", timeout_ms=10_000)
+            clicked_strategies.append(f"{strategy}:{click_method}")
+            page.wait_for_timeout(4500)
+            button_state_snapshots.append({
+                "attempt": attempt + 1,
+                "phase": "after_click",
+                "states": _collect_final_post_button_states(page),
+                "url": page.url,
+            })
+            if attempt == 0:
+                print("   ℹ️ 投稿確認用の追加ボタンが残っている可能性があるため、もう一度確認します")
     finally:
         try:
             page.remove_listener("response", on_response)
@@ -2421,6 +2460,8 @@ def _click_final_post_button(page, note_key: str = "", dry_run: bool = False) ->
         "strategy": "->".join(clicked_strategies),
         "responses": responses,
         "button_states": button_states,
+        "button_state_snapshots": button_state_snapshots,
+        "final_url_after_click": page.url,
     }
 
 
@@ -2450,10 +2491,18 @@ def _publish_editor_page(page, tags: str = NOTE_POST_TAGS, dry_run: bool = False
         result["final_url"] = page.url
         result["publish_complete_strategy"] = "dry_run"
     else:
-        completion = _wait_for_published_note_url(page, note_key)
-        result["final_url"] = completion["url"]
-        result["publish_complete_strategy"] = completion["strategy"]
-        result["public_reachability"] = completion.get("reachability", {})
+        try:
+            completion = _wait_for_published_note_url(page, note_key)
+            result["final_url"] = completion["url"]
+            result["publish_complete_strategy"] = completion["strategy"]
+            result["public_reachability"] = completion.get("reachability", {})
+        except Exception as exc:
+            result["success"] = False
+            result["error"] = str(exc)
+            result["final_url"] = page.url
+            result["publish_complete_strategy"] = "publish_completion_unverified"
+            print(f"   ❌ 公開投稿フロー失敗: {exc}")
+            return result
     result["success"] = True
     print(f"   ✅ 公開投稿フロー完了: {result['final_url']}")
     return result

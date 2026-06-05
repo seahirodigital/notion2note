@@ -3500,6 +3500,172 @@ def _xsrf_token(session: http_requests.Session) -> str:
     return ""
 
 
+def _plain_text_length_from_html(body_html: str) -> int:
+    return len(re.sub(r"<[^>]+>", "", body_html))
+
+
+def _session_cookie_dict(session: http_requests.Session) -> dict[str, str]:
+    return {cookie.name: cookie.value for cookie in session.cookies if cookie.name and cookie.value}
+
+
+def _merge_playwright_cookies_into_session(session: http_requests.Session, cookies: list[dict]) -> None:
+    for cookie in cookies:
+        name = cookie.get("name")
+        value = cookie.get("value")
+        if not name or value is None:
+            continue
+        session.cookies.set(
+            name,
+            value,
+            domain=cookie.get("domain") or ".note.com",
+            path=cookie.get("path") or "/",
+        )
+
+
+def _create_draft_browser_fallback(session: http_requests.Session, title: str, body_html: str) -> dict:
+    """GitHub Actions上のAPI直叩きがCloudFrontで拒否された場合、ブラウザ文脈のfetchで下書きを作る。"""
+    cookies = _session_cookie_dict(session)
+    if not cookies:
+        print("   ⚠️ ブラウザ経由フォールバック用Cookieがないためスキップします")
+        return {}
+
+    print("   🌐 API直叩き失敗 → Playwrightブラウザ経由で下書き作成を再試行します")
+    try:
+        from playwright.sync_api import sync_playwright
+    except Exception as exc:
+        print(f"   ⚠️ Playwrightを読み込めないためブラウザ経由フォールバックをスキップします: {exc}")
+        return {}
+
+    plain_length = _plain_text_length_from_html(body_html)
+    with sync_playwright() as p:
+        browser = p.chromium.launch(
+            headless=True,
+            args=["--disable-blink-features=AutomationControlled", "--no-sandbox"],
+        )
+        context = browser.new_context(
+            viewport={"width": 1280, "height": 900},
+            user_agent=UA,
+            locale="ja-JP",
+        )
+        context.add_cookies(_cookies_to_playwright(cookies))
+        page = context.new_page()
+
+        try:
+            try:
+                page.goto("https://note.com/", wait_until="domcontentloaded", timeout=30_000)
+                page.wait_for_timeout(1000)
+            except Exception as exc:
+                print(f"   ⚠️ note.com事前ロードに失敗しました（続行）: {exc}")
+
+            result = page.evaluate(
+                """
+                async ({ title, bodyHtml, plainLength }) => {
+                  const readCookie = (name) => {
+                    const pair = document.cookie
+                      .split(';')
+                      .map((part) => part.trim())
+                      .find((part) => part.startsWith(`${name}=`));
+                    if (!pair) return '';
+                    try {
+                      return decodeURIComponent(pair.slice(name.length + 1));
+                    } catch {
+                      return pair.slice(name.length + 1);
+                    }
+                  };
+                  const postJson = async (url, payload) => {
+                    const headers = {
+                      'Content-Type': 'application/json',
+                      'X-Requested-With': 'XMLHttpRequest',
+                    };
+                    const xsrf = readCookie('XSRF-TOKEN');
+                    if (xsrf) headers['X-XSRF-TOKEN'] = xsrf;
+                    const response = await fetch(url, {
+                      method: 'POST',
+                      credentials: 'include',
+                      headers,
+                      body: JSON.stringify(payload),
+                    });
+                    const text = await response.text();
+                    let json = null;
+                    try {
+                      json = text ? JSON.parse(text) : null;
+                    } catch {}
+                    return {
+                      ok: response.ok,
+                      status: response.status,
+                      text: text.slice(0, 1000),
+                      json,
+                    };
+                  };
+
+                  const created = await postJson('https://note.com/api/v1/text_notes', { template_key: null });
+                  if (!created.ok) {
+                    return { ok: false, phase: 'create', response: created, href: location.href };
+                  }
+                  const noteData = (created.json && created.json.data) || {};
+                  const articleId = noteData.id || '';
+                  const articleKey = noteData.key || '';
+                  if (!articleId || !articleKey) {
+                    return { ok: false, phase: 'create_parse', response: created, href: location.href };
+                  }
+
+                  const payload = {
+                    body: bodyHtml,
+                    body_length: plainLength,
+                    name: title,
+                    index: false,
+                    is_lead_form: false,
+                    image_keys: [],
+                  };
+                  const saved = await postJson(
+                    `https://note.com/api/v1/text_notes/draft_save?id=${encodeURIComponent(articleId)}&is_temp_saved=true`,
+                    payload,
+                  );
+                  if (!saved.ok) {
+                    return {
+                      ok: false,
+                      phase: 'draft_save',
+                      response: saved,
+                      id: articleId,
+                      key: articleKey,
+                      href: location.href,
+                    };
+                  }
+
+                  return {
+                    ok: true,
+                    id: articleId,
+                    key: articleKey,
+                    url: `https://editor.note.com/notes/${articleKey}/edit/`,
+                    create_status: created.status,
+                    save_status: saved.status,
+                    href: location.href,
+                  };
+                }
+                """,
+                {"title": title, "bodyHtml": body_html, "plainLength": plain_length},
+            )
+
+            _merge_playwright_cookies_into_session(
+                session,
+                context.cookies(["https://note.com", "https://editor.note.com"]),
+            )
+        finally:
+            browser.close()
+
+    if result.get("ok"):
+        print(f"   ✅ ブラウザ経由下書き作成成功: ID={result.get('id')}, key={result.get('key')}")
+        return {"id": result.get("id", ""), "key": result.get("key", ""), "url": result.get("url", "")}
+
+    response = result.get("response") or {}
+    print(
+        "   ❌ ブラウザ経由下書き作成失敗: "
+        f"phase={result.get('phase')} status={response.get('status')} "
+        f"body={str(response.get('text') or '')[:300]}"
+    )
+    return {}
+
+
 def _create_draft_api(session: http_requests.Session, title: str, body_html: str) -> dict:
     """
     2ステップで下書き作成:
@@ -3507,8 +3673,6 @@ def _create_draft_api(session: http_requests.Session, title: str, body_html: str
     2. POST /api/v1/text_notes/draft_save?id={id}&is_temp_saved=true で本文を保存
     ※ PUT は公開用。下書き保存には draft_save エンドポイントを使う（NoteClient2準拠）
     """
-    import re as _re
-
     # ── Step 1: 記事スケルトン作成 ──
     print("   📝 Step1: 記事スケルトン作成...")
     res = session.post(
@@ -3544,10 +3708,9 @@ def _create_draft_api(session: http_requests.Session, title: str, body_html: str
         session.get("https://note.com/", timeout=15)
         xsrf = _xsrf_token(session)
 
-    plain_text = _re.sub(r"<[^>]+>", "", body_html)
     payload = {
         "body": body_html,
-        "body_length": len(plain_text),
+        "body_length": _plain_text_length_from_html(body_html),
         "name": title,
         "index": False,
         "is_lead_form": False,
@@ -3668,10 +3831,23 @@ def post_draft_to_note(
 
     # Phase 2: 下書き作成
     print("\n── Phase 2: 下書き作成（API） ──")
+    draft_strategy = "api"
+
+    def _retry_create_draft_in_browser(label: str) -> dict:
+        try:
+            return _create_draft_browser_fallback(session, title, body_html)
+        except Exception as exc:
+            print(f"   ⚠️ ブラウザ経由下書き作成の例外でスキップします ({label}): {exc}")
+            return {}
+
     draft = _create_draft_api(session, title, body_html)
     if not draft:
+        draft = _retry_create_draft_in_browser("before_session_refresh")
+        if draft:
+            draft_strategy = "browser_before_session_refresh"
+    if not draft:
         if not _verify_session(session):
-            print("   ⚠️ Cookie無効 → APIログインにフォールバック")
+            print("   ⚠️ 下書き作成APIが拒否されました → セッション再取得を試します")
             try:
                 login_ok = _api_login(session)
             except NoteLoginRequiresManualAction as e:
@@ -3680,12 +3856,18 @@ def post_draft_to_note(
             if not login_ok:
                 print("❌ 全ての認証手段が失敗しました")
                 return result
+        draft_strategy = "api_after_session_check"
         draft = _create_draft_api(session, title, body_html)
+        if not draft:
+            draft = _retry_create_draft_in_browser("after_session_check")
+            if draft:
+                draft_strategy = "browser_after_session_check"
     if not draft:
         return result
 
     result["success"] = True
     result["url"] = draft.get("url", "")
+    result["draft_creation_strategy"] = draft_strategy
 
     # Phase 3: セッション更新
     print("\n── Phase 3: セッション更新 ──")

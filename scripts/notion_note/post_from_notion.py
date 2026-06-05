@@ -24,6 +24,7 @@ import requests
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 NOTE_ENGINE_PATH = REPO_ROOT / "scripts" / "note_engine" / "note_draft_poster.py"
+NOTE_POST_PUBLISHER_PATH = REPO_ROOT / "scripts" / "note_post" / "note_post_publisher.py"
 AFFILIATE_FILE = REPO_ROOT / "affiliate_links.txt"
 TAG_FILE = REPO_ROOT / "tag.md"
 DEFAULT_RESULT_JSON = Path(tempfile.gettempdir()) / "notion_note_result.json"
@@ -730,6 +731,16 @@ def _load_note_engine():
     return module
 
 
+def _load_note_publisher():
+    spec = importlib.util.spec_from_file_location("notion_note_publish_runtime", NOTE_POST_PUBLISHER_PATH)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"note本番投稿ラッパーを読み込めません: {NOTE_POST_PUBLISHER_PATH}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["notion_note_publish_runtime"] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 def _write_result_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -831,21 +842,34 @@ def main() -> int:
         dump_path.write_text(markdown, encoding="utf-8")
         print(f"   [情報] 整形済みMarkdownを書き出しました: {dump_path}")
 
-    note_engine = _load_note_engine()
     result: dict[str, Any] = {}
     deleted_temp_images: list[str] = []
     try:
-        result = note_engine.post_draft_to_note(
-            markdown,
-            run_ogp=not args.no_ogp,
-            run_top_image=bool(top_image_path),
-            insert_toc=not args.no_toc,
-            publish=args.publish or args.dry_run_publish,
-            dry_run_publish=args.dry_run_publish,
-            publish_tags=tags or getattr(note_engine, "NOTE_POST_TAGS", ""),
-            top_image_path=str(top_image_path) if top_image_path else "",
-            body_image_uploads=body_image_uploads,
-        )
+        if args.publish or args.dry_run_publish:
+            note_publisher = _load_note_publisher()
+            result = note_publisher.publish_markdown_to_note(
+                markdown,
+                run_ogp=not args.no_ogp,
+                run_top_image=bool(top_image_path),
+                insert_toc=not args.no_toc,
+                publish_tags=tags,
+                top_image_path=str(top_image_path) if top_image_path else "",
+                body_image_uploads=body_image_uploads,
+                dry_run_publish=args.dry_run_publish,
+            )
+        else:
+            note_engine = _load_note_engine()
+            result = note_engine.post_draft_to_note(
+                markdown,
+                run_ogp=not args.no_ogp,
+                run_top_image=bool(top_image_path),
+                insert_toc=not args.no_toc,
+                publish=False,
+                dry_run_publish=False,
+                publish_tags=tags or getattr(note_engine, "NOTE_POST_TAGS", ""),
+                top_image_path=str(top_image_path) if top_image_path else "",
+                body_image_uploads=body_image_uploads,
+            )
     finally:
         deleted_temp_images = _delete_temp_images(temp_image_paths)
     result["notion_note_preprocess"] = {
@@ -862,9 +886,7 @@ def main() -> int:
         "body_image_upload_count": len(body_image_uploads),
         "deleted_temp_image_paths": deleted_temp_images,
     }
-    if args.publish and not args.dry_run_publish and result.get("success"):
-        result["discord_notification"] = _notify_discord_after_publish(str(result.get("published_url") or ""))
-    else:
+    if "discord_notification" not in result:
         result["discord_notification"] = {
             "attempted": False,
             "success": False,

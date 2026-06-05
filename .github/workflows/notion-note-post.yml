@@ -71,6 +71,9 @@ jobs:
   post-to-note:
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    concurrency:
+      group: notion-note-post-${{ github.repository }}-${{ inputs.note_target }}
+      cancel-in-progress: false
     permissions:
       contents: read
 

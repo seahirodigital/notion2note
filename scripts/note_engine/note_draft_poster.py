@@ -87,6 +87,11 @@ NOTE_PUBLISH_MAGAZINE_NAME = os.getenv("NOTE_PUBLISH_MAGAZINE_NAME", "投資Yout
 NOTE_PUBLISH_COMPLETE_TIMEOUT_MS = int(os.getenv("NOTE_PUBLISH_COMPLETE_TIMEOUT_MS", "90000"))
 NOTE_PUBLISH_COMPLETE_POLL_MS = int(os.getenv("NOTE_PUBLISH_COMPLETE_POLL_MS", "1000"))
 NOTE_PUBLISH_MAX_TAGS = int(os.getenv("NOTE_PUBLISH_MAX_TAGS", "98"))
+NOTE_CLOUDFRONT_RETRY_DELAYS = tuple(
+    int(part.strip())
+    for part in os.getenv("NOTE_CLOUDFRONT_RETRY_DELAYS", "45,90,180").split(",")
+    if part.strip()
+)
 
 EDITOR_CONTENT_SELECTOR  = ".ProseMirror p, .ProseMirror h2, .ProseMirror h3"
 EDITOR_LOAD_TIMEOUT_SEC  = 60
@@ -3785,6 +3790,56 @@ def _create_session(cookies: dict) -> http_requests.Session:
     return session
 
 
+def _is_cloudfront_403_response(response) -> bool:
+    try:
+        status_code = int(getattr(response, "status_code", 0))
+        text = (getattr(response, "text", "") or "").lower()
+    except Exception:
+        return False
+    return status_code == 403 and (
+        "the request could not be satisfied" in text
+        or "cloudfront" in text
+        or "<h1>403 error</h1>" in text
+    )
+
+
+def _is_cloudfront_403_payload(payload: dict | None) -> bool:
+    payload = payload or {}
+    try:
+        status_code = int(payload.get("status") or 0)
+        text = str(payload.get("text") or "").lower()
+    except Exception:
+        return False
+    return status_code == 403 and (
+        "the request could not be satisfied" in text
+        or "cloudfront" in text
+        or "<h1>403 error</h1>" in text
+    )
+
+
+def _post_json_with_cloudfront_retry(
+    session: http_requests.Session,
+    url: str,
+    payload: dict,
+    *,
+    headers: dict | None = None,
+    timeout: int = 30,
+    label: str = "note API",
+):
+    response = None
+    for attempt, delay in enumerate([0, *NOTE_CLOUDFRONT_RETRY_DELAYS], start=1):
+        if delay:
+            print(f"   ⏳ {label}: CloudFront 403 のため {delay}秒待って再試行します ({attempt}/{len(NOTE_CLOUDFRONT_RETRY_DELAYS) + 1})")
+            time.sleep(delay)
+        response = session.post(url, json=payload, headers=headers, timeout=timeout)
+        if not _is_cloudfront_403_response(response):
+            return response
+        if attempt == len(NOTE_CLOUDFRONT_RETRY_DELAYS) + 1:
+            print(f"   ❌ {label}: CloudFront 403 が継続しています")
+            return response
+    return response
+
+
 def _verify_session(session: http_requests.Session) -> bool:
     """セッションが有効か確認（ユーザー情報取得を試行）"""
     try:
@@ -3866,10 +3921,12 @@ def _api_login(session: http_requests.Session) -> bool:
 
     for attempt in login_attempts:
         try:
-            res = session.post(
+            res = _post_json_with_cloudfront_retry(
+                session,
                 attempt["url"],
-                json=attempt["payload"],
+                attempt["payload"],
                 timeout=15,
+                label=f"APIログイン {attempt['url']}",
             )
             if res.ok:
                 # レスポンスbodyにerrorが含まれていないか確認
@@ -3900,6 +3957,9 @@ def _api_login(session: http_requests.Session) -> bool:
                 break  # 認証情報が無効なので他を試しても無駄
             elif res.status_code == 404:
                 continue  # エンドポイント不在 → 次を試す
+            elif _is_cloudfront_403_response(res):
+                print("   ⚠️ note側CloudFront 403が継続しているため、残りのログインAPI候補は試さず終了します")
+                return False
             else:
                 print(f"   ⚠️ {attempt['url']} → {res.status_code}: {res.text[:150]}")
         except NoteLoginRequiresManualAction:
@@ -3982,7 +4042,16 @@ def _create_draft_browser_fallback(session: http_requests.Session, title: str, b
 
             result = page.evaluate(
                 """
-                async ({ title, bodyHtml, plainLength }) => {
+                async ({ title, bodyHtml, plainLength, retryDelays }) => {
+                  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+                  const isCloudFront403 = (response) => {
+                    const text = String((response && response.text) || '').toLowerCase();
+                    return Number((response && response.status) || 0) === 403 && (
+                      text.includes('the request could not be satisfied') ||
+                      text.includes('cloudfront') ||
+                      text.includes('<h1>403 error</h1>')
+                    );
+                  };
                   const readCookie = (name) => {
                     const pair = document.cookie
                       .split(';')
@@ -4020,8 +4089,27 @@ def _create_draft_browser_fallback(session: http_requests.Session, title: str, b
                       json,
                     };
                   };
+                  const postJsonWithRetry = async (label, url, payload) => {
+                    const delays = [0, ...(retryDelays || [])];
+                    let response = null;
+                    for (let i = 0; i < delays.length; i += 1) {
+                      const delay = Number(delays[i] || 0);
+                      if (delay > 0) {
+                        await sleep(delay * 1000);
+                      }
+                      response = await postJson(url, payload);
+                      if (!isCloudFront403(response) || i === delays.length - 1) {
+                        return response;
+                      }
+                    }
+                    return response;
+                  };
 
-                  const created = await postJson('https://note.com/api/v1/text_notes', { template_key: null });
+                  const created = await postJsonWithRetry(
+                    'create',
+                    'https://note.com/api/v1/text_notes',
+                    { template_key: null },
+                  );
                   if (!created.ok) {
                     return { ok: false, phase: 'create', response: created, href: location.href };
                   }
@@ -4040,7 +4128,8 @@ def _create_draft_browser_fallback(session: http_requests.Session, title: str, b
                     is_lead_form: false,
                     image_keys: [],
                   };
-                  const saved = await postJson(
+                  const saved = await postJsonWithRetry(
+                    'draft_save',
                     `https://note.com/api/v1/text_notes/draft_save?id=${encodeURIComponent(articleId)}&is_temp_saved=true`,
                     payload,
                   );
@@ -4066,7 +4155,12 @@ def _create_draft_browser_fallback(session: http_requests.Session, title: str, b
                   };
                 }
                 """,
-                {"title": title, "bodyHtml": body_html, "plainLength": plain_length},
+                {
+                    "title": title,
+                    "bodyHtml": body_html,
+                    "plainLength": plain_length,
+                    "retryDelays": list(NOTE_CLOUDFRONT_RETRY_DELAYS),
+                },
             )
 
             _merge_playwright_cookies_into_session(
@@ -4081,6 +4175,8 @@ def _create_draft_browser_fallback(session: http_requests.Session, title: str, b
         return {"id": result.get("id", ""), "key": result.get("key", ""), "url": result.get("url", "")}
 
     response = result.get("response") or {}
+    if _is_cloudfront_403_payload(response):
+        print("   ⚠️ ブラウザ経由でも CloudFront 403 が継続しました。note側の一時ブロックとして扱います")
     print(
         "   ❌ ブラウザ経由下書き作成失敗: "
         f"phase={result.get('phase')} status={response.get('status')} "
@@ -4098,10 +4194,12 @@ def _create_draft_api(session: http_requests.Session, title: str, body_html: str
     """
     # ── Step 1: 記事スケルトン作成 ──
     print("   📝 Step1: 記事スケルトン作成...")
-    res = session.post(
+    res = _post_json_with_cloudfront_retry(
+        session,
         f"{NOTE_API_BASE}/v1/text_notes",
-        json={"template_key": None},
+        {"template_key": None},
         timeout=30,
+        label="記事スケルトン作成",
     )
     print(f"   🔍 POST {res.status_code}")
     if not res.ok:
@@ -4147,7 +4245,14 @@ def _create_draft_api(session: http_requests.Session, title: str, body_html: str
         "Referer": "https://editor.note.com/",
     }
     draft_url = f"{NOTE_API_BASE}/v1/text_notes/draft_save?id={article_id}&is_temp_saved=true"
-    res2 = session.post(draft_url, json=payload, headers=draft_headers, timeout=30)
+    res2 = _post_json_with_cloudfront_retry(
+        session,
+        draft_url,
+        payload,
+        headers=draft_headers,
+        timeout=30,
+        label="本文 draft_save",
+    )
     print(f"   🔍 draft_save {res2.status_code}")
     if not res2.ok:
         print(f"   ❌ 本文保存失敗 ({res2.status_code}): {res2.text[:300]}")

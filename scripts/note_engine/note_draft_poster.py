@@ -2175,84 +2175,253 @@ def _published_page_looks_available(page) -> bool:
     return bool(status.get("ok"))
 
 
+def _public_note_url_is_reachable(url: str, note_key: str = "") -> dict:
+    status = {
+        "ok": False,
+        "url": url,
+        "status_code": 0,
+        "final_url": "",
+        "error": "",
+        "sample_text": "",
+    }
+    if not _is_public_note_url(url, note_key):
+        status["error"] = f"公開URL形式ではありません: {url}"
+        return status
+
+    try:
+        response = http_requests.get(
+            url,
+            headers={
+                "User-Agent": UA,
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "ja,en-US;q=0.9,en;q=0.8",
+                "Cache-Control": "no-cache",
+                "Pragma": "no-cache",
+            },
+            allow_redirects=True,
+            timeout=30,
+        )
+    except Exception as exc:
+        status["error"] = str(exc)
+        return status
+
+    status["status_code"] = int(response.status_code)
+    status["final_url"] = response.url
+    text = response.text or ""
+    compact_text = re.sub(r"\s+", " ", text).strip()
+    status["sample_text"] = compact_text[:200]
+    unavailable_words = [
+        "記事が見つかりません",
+        "ページが見つかりません",
+        "お探しの記事は見つかりません",
+        "存在しません",
+        "非公開",
+        "削除されました",
+    ]
+    if response.status_code != 200:
+        status["error"] = f"HTTP {response.status_code}"
+        return status
+    if note_key and note_key not in response.url and note_key not in text:
+        status["error"] = f"記事キー {note_key} を公開ページ内で確認できません"
+        return status
+    if any(word in compact_text for word in unavailable_words):
+        status["error"] = "未公開または存在しないページ文言を検出しました"
+        return status
+    status["ok"] = True
+    return status
+
+
 def _wait_for_published_note_url(page, note_key: str = "") -> dict:
     started_at = time.monotonic()
     deadline = started_at + (NOTE_PUBLISH_COMPLETE_TIMEOUT_MS / 1000)
     last_url = page.url
+    last_reachability = {}
 
     while time.monotonic() < deadline:
         last_url = page.url
         if _is_public_note_url(last_url, note_key):
-            if _published_page_looks_available(page):
+            reachability = _public_note_url_is_reachable(last_url, note_key)
+            last_reachability = reachability
+            if reachability.get("ok"):
                 elapsed = time.monotonic() - started_at
-                return {"url": last_url, "strategy": f"page_url_after_{elapsed:.1f}s"}
+                return {
+                    "url": reachability.get("final_url") or last_url,
+                    "strategy": f"public_http_200_page_url_after_{elapsed:.1f}s",
+                    "reachability": reachability,
+                }
+            print(
+                "   ⏳ 公開URL候補は未公開です: "
+                f"{last_url} / {reachability.get('error', '')}"
+            )
 
         candidates = _collect_published_note_url_candidates(page, note_key)
-        if candidates:
-            elapsed = time.monotonic() - started_at
-            return {"url": candidates[0], "strategy": f"dom_url_candidate_after_{elapsed:.1f}s"}
+        for candidate in candidates:
+            reachability = _public_note_url_is_reachable(candidate, note_key)
+            last_reachability = reachability
+            if reachability.get("ok"):
+                elapsed = time.monotonic() - started_at
+                return {
+                    "url": reachability.get("final_url") or candidate,
+                    "strategy": f"public_http_200_dom_candidate_after_{elapsed:.1f}s",
+                    "reachability": reachability,
+                }
+            print(
+                "   ⏳ 公開URL候補は未公開です: "
+                f"{candidate} / {reachability.get('error', '')}"
+            )
 
         page.wait_for_timeout(max(250, NOTE_PUBLISH_COMPLETE_POLL_MS))
-
-    if note_key:
-        landing_url = f"https://note.com/notes/{note_key}/landing"
-        print(f"   🔎 公開済みURLを直接確認します: {landing_url}")
-        try:
-            page.goto(landing_url, wait_until="domcontentloaded", timeout=20_000)
-            try:
-                page.wait_for_load_state("networkidle", timeout=10_000)
-            except Exception:
-                pass
-            page.wait_for_timeout(1500)
-            if _is_public_note_url(page.url, note_key) and _published_page_looks_available(page):
-                return {"url": page.url, "strategy": "landing_url_probe"}
-            candidates = _collect_published_note_url_candidates(page, note_key)
-            if candidates:
-                return {"url": candidates[0], "strategy": "landing_dom_url_candidate"}
-        except Exception as exc:
-            print(f"   ⚠️ 公開済みURLの直接確認に失敗しました: {exc}")
 
     if NOTE_TOP_IMAGE_DEBUG:
         _dump_page_artifacts(page, NOTE_TOP_IMAGE_ARTIFACTS_DIR, "publish_completion_timeout")
         _write_json(
             NOTE_TOP_IMAGE_ARTIFACTS_DIR / "publish_completion_timeout.json",
-            {"last_url": last_url, "note_key": note_key},
+            {"last_url": last_url, "note_key": note_key, "last_reachability": last_reachability},
         )
     raise RuntimeError(
-        "公開完了URLを確認できませんでした。"
+        "未ログインHTTP 200で確認できる公開済みURLを確認できませんでした。"
         f"最後のURLは {last_url} です。"
-        "editor.note.com の公開設定画面に留まっている可能性があります。"
+        f"最後の公開確認結果は {last_reachability} です。"
     )
 
 
 
-def _click_final_post_button(page, dry_run: bool = False) -> str:
+def _collect_final_post_button_states(page) -> list[dict]:
+    try:
+        return page.evaluate(
+            """
+            () => {
+              const normalize = (value) => (value || '').replace(/\\s+/g, ' ').trim();
+              const isVisible = (el) => {
+                const rect = el.getBoundingClientRect();
+                const style = window.getComputedStyle(el);
+                return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+              };
+              return Array.from(document.querySelectorAll('button, [role="button"]'))
+                .map((button, index) => {
+                  const text = normalize(button.innerText || button.textContent || button.getAttribute('aria-label') || '');
+                  const disabled = Boolean(button.disabled) || button.getAttribute('aria-disabled') === 'true';
+                  const rect = button.getBoundingClientRect();
+                  return {
+                    index,
+                    text,
+                    visible: isVisible(button),
+                    disabled,
+                    className: String(button.className || ''),
+                    x: Math.round(rect.x),
+                    y: Math.round(rect.y),
+                    width: Math.round(rect.width),
+                    height: Math.round(rect.height),
+                  };
+                })
+                .filter((button) => button.text.includes('投稿する'));
+            }
+            """
+        )
+    except Exception as exc:
+        return [{"error": str(exc)}]
+
+
+def _find_enabled_final_post_button(page, timeout_ms: int = 20_000):
+    deadline = time.monotonic() + (timeout_ms / 1000)
+    last_states: list[dict] = []
+    while time.monotonic() < deadline:
+        last_states = _collect_final_post_button_states(page)
+        candidates = [
+            ("role_button_投稿する", page.get_by_role("button", name="投稿する")),
+            ("button_text_投稿する", page.locator("button").filter(has_text="投稿する")),
+        ]
+        for strategy, locator in candidates:
+            try:
+                total = locator.count()
+            except Exception:
+                continue
+            for idx in range(total - 1, -1, -1):
+                candidate = locator.nth(idx)
+                try:
+                    candidate.wait_for(state="visible", timeout=500)
+                    if candidate.is_enabled(timeout=500):
+                        return f"{strategy}#{idx}", candidate, last_states
+                except Exception:
+                    continue
+        page.wait_for_timeout(500)
+    raise RuntimeError(f"有効な投稿するボタンを確認できませんでした: {last_states}")
+
+
+def _capture_publish_response_summary(response, note_key: str = "") -> dict | None:
+    try:
+        request = response.request
+        method = request.method
+        url = response.url
+        if method == "GET":
+            return None
+        lower_url = url.lower()
+        if not any(token in lower_url for token in ["text_notes", "publish", "notes"]):
+            return None
+        summary = {
+            "method": method,
+            "url": url,
+            "status": response.status,
+            "ok": response.ok,
+        }
+        if note_key and note_key not in url:
+            return None
+        return summary
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
+def _click_final_post_button(page, note_key: str = "", dry_run: bool = False) -> dict:
     if dry_run:
         print("   🧪 dry-run のため「投稿する」はクリックしません")
-        return "dry_run"
+        return {"strategy": "dry_run", "responses": [], "button_states": []}
 
-    strategy = ""
-    for attempt in range(2):
+    responses: list[dict] = []
+
+    def on_response(response):
+        summary = _capture_publish_response_summary(response, note_key)
+        if summary:
+            responses.append(summary)
+
+    page.on("response", on_response)
+    try:
+        clicked_strategies: list[str] = []
+        button_states: list[dict] = []
+        for attempt in range(2):
+            strategy, locator, states = _find_enabled_final_post_button(page)
+            button_states = states
+            locator.scroll_into_view_if_needed()
+            locator.click(timeout=10_000)
+            clicked_strategies.append(strategy)
+            print(f"   ✅ 投稿する: {strategy} (通常click)")
+            page.wait_for_timeout(4500)
+
+            visible_enabled = False
+            try:
+                _, _, button_states = _find_enabled_final_post_button(page, timeout_ms=1500)
+                visible_enabled = True
+            except Exception:
+                visible_enabled = False
+            if not visible_enabled:
+                break
+            print("   ℹ️ 投稿確認用の追加ボタンが残っているため、もう一度クリックします")
+    finally:
         try:
-            strategy = _click_visible_candidate(
-                page,
-                candidates=[
-                    ("role_button_投稿する", page.get_by_role("button", name="投稿する")),
-                    ("button_text_投稿する", page.locator("button").filter(has_text="投稿する")),
-                ],
-                description="投稿する",
-                timeout_ms=8000,
-            )
-            page.wait_for_timeout(4000)
-        except Exception as exc:
-            if attempt == 0:
-                raise
-            print(f"   ℹ️ 追加の投稿確認ボタンはありませんでした: {exc}")
-        else:
-            # 確認モーダルなどで同名ボタンが残る場合だけ、もう一度押せるようにする。
-            continue
-        break
-    return strategy
+            page.remove_listener("response", on_response)
+        except Exception:
+            pass
+
+    failed_responses = [
+        item for item in responses
+        if isinstance(item, dict) and item.get("status") and int(item.get("status") or 0) >= 400
+    ]
+    if failed_responses:
+        raise RuntimeError(f"投稿APIが失敗しました: {failed_responses}")
+    return {
+        "strategy": "->".join(clicked_strategies),
+        "responses": responses,
+        "button_states": button_states,
+    }
 
 
 def _publish_editor_page(page, tags: str = NOTE_POST_TAGS, dry_run: bool = False) -> dict:
@@ -2273,7 +2442,9 @@ def _publish_editor_page(page, tags: str = NOTE_POST_TAGS, dry_run: bool = False
     result["publish_settings_ready_strategy"] = _wait_for_publish_settings_ready(page)
     result["tag_strategy"] = _fill_note_hashtags(page, tags)
     result["magazine_strategy"] = _add_publish_magazine(page)
-    result["post_strategy"] = _click_final_post_button(page, dry_run=dry_run)
+    post_result = _click_final_post_button(page, note_key=note_key, dry_run=dry_run)
+    result["post_strategy"] = post_result.get("strategy", "")
+    result["post_result"] = post_result
     if dry_run:
         page.wait_for_timeout(1000)
         result["final_url"] = page.url
@@ -2282,6 +2453,7 @@ def _publish_editor_page(page, tags: str = NOTE_POST_TAGS, dry_run: bool = False
         completion = _wait_for_published_note_url(page, note_key)
         result["final_url"] = completion["url"]
         result["publish_complete_strategy"] = completion["strategy"]
+        result["public_reachability"] = completion.get("reachability", {})
     result["success"] = True
     print(f"   ✅ 公開投稿フロー完了: {result['final_url']}")
     return result

@@ -23,6 +23,11 @@ TAG_FILE = REPO_ROOT / "tag.md"
 DEFAULT_RESULT_JSON = Path(tempfile.gettempdir()) / "note_post_result.json"
 DISCORD_WEBHOOK_URL = os.getenv("NOTION2NOTE_DISCORD_WEBHOOK", "").strip()
 DISCORD_X_TEMPLATE_TAGS = "#投資初心者 #投資 #デイトレ #日本株 #日経平均 #米国株 #高配当 #FX #ドル円"
+HTTP_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/125.0.0.0 Safari/537.36"
+)
 
 
 def _load_note_engine():
@@ -74,6 +79,58 @@ def _is_public_note_url(note_url: str) -> bool:
     return bool(re.search(r"/(?:notes/|n/)?n[0-9a-f]{8,}(?:[/?#]|$)", note_url or "", re.IGNORECASE))
 
 
+def _public_note_url_is_reachable(note_url: str) -> dict[str, Any]:
+    status: dict[str, Any] = {
+        "ok": False,
+        "url": note_url,
+        "status_code": 0,
+        "final_url": "",
+        "error": "",
+        "sample_text": "",
+    }
+    if not _is_public_note_url(note_url):
+        status["error"] = f"公開URL形式ではありません: {note_url}"
+        return status
+
+    try:
+        response = requests.get(
+            note_url,
+            headers={
+                "User-Agent": HTTP_UA,
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "ja,en-US;q=0.9,en;q=0.8",
+                "Cache-Control": "no-cache",
+                "Pragma": "no-cache",
+            },
+            allow_redirects=True,
+            timeout=30,
+        )
+    except requests.RequestException as exc:
+        status["error"] = str(exc)
+        return status
+
+    status["status_code"] = int(response.status_code)
+    status["final_url"] = response.url
+    compact_text = re.sub(r"\s+", " ", response.text or "").strip()
+    status["sample_text"] = compact_text[:200]
+    unavailable_words = [
+        "記事が見つかりません",
+        "ページが見つかりません",
+        "お探しの記事は見つかりません",
+        "存在しません",
+        "非公開",
+        "削除されました",
+    ]
+    if response.status_code != 200:
+        status["error"] = f"HTTP {response.status_code}"
+        return status
+    if any(word in compact_text for word in unavailable_words):
+        status["error"] = "未公開または存在しないページ文言を検出しました"
+        return status
+    status["ok"] = True
+    return status
+
+
 def notify_discord_after_publish(note_url: str) -> dict[str, Any]:
     status: dict[str, Any] = {
         "attempted": False,
@@ -90,6 +147,14 @@ def notify_discord_after_publish(note_url: str) -> dict[str, Any]:
         status["error"] = f"公開済みURLではないためDiscord通知をスキップしました: {note_url}"
         print(f"   [警告] {status['error']}")
         return status
+    reachability = _public_note_url_is_reachable(note_url)
+    status["public_reachability"] = reachability
+    if not reachability.get("ok"):
+        status["error"] = f"未ログインで公開確認できないためDiscord通知をスキップしました: {reachability}"
+        print(f"   [警告] {status['error']}")
+        return status
+    note_url = str(reachability.get("final_url") or note_url)
+    status["url"] = note_url
     if not DISCORD_WEBHOOK_URL:
         status["error"] = "NOTION2NOTE_DISCORD_WEBHOOK が未設定のためDiscord通知をスキップしました。"
         print(f"   [情報] {status['error']}")
@@ -150,7 +215,22 @@ def publish_markdown_to_note(
                 "error": result["publish_url_error"],
             }
             return result
-        result["discord_notification"] = notify_discord_after_publish(published_url)
+        reachability = _public_note_url_is_reachable(published_url)
+        result["public_reachability"] = reachability
+        if not reachability.get("ok"):
+            result["success"] = False
+            result["publish_url_error"] = f"未ログインで公開確認できませんでした: {reachability}"
+            result["discord_notification"] = {
+                "attempted": False,
+                "success": False,
+                "webhook_configured": bool(DISCORD_WEBHOOK_URL),
+                "url": published_url,
+                "error": result["publish_url_error"],
+                "public_reachability": reachability,
+            }
+            return result
+        result["published_url"] = str(reachability.get("final_url") or published_url)
+        result["discord_notification"] = notify_discord_after_publish(result["published_url"])
     else:
         result["discord_notification"] = {
             "attempted": False,

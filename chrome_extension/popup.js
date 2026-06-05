@@ -5,9 +5,10 @@ const DEFAULTS = {
   ref: "main",
   token: "",
   pageUrl: "",
+  noteTitle: "",
 };
 
-const TEXT_KEYS = ["owner", "repo", "workflow", "ref", "token", "pageUrl"];
+const TEXT_KEYS = ["owner", "repo", "workflow", "ref", "token", "pageUrl", "noteTitle"];
 const ONEDRIVE_REPO_DIR = "C:\\Users\\mahha\\OneDrive\\開発\\notion2note";
 const QUICK_LINK_PATHS = {
   affiliate: `${ONEDRIVE_REPO_DIR}\\affiliate_links.txt`,
@@ -21,6 +22,7 @@ const fields = {
   ref: document.getElementById("ref"),
   token: document.getElementById("token"),
   pageUrl: document.getElementById("pageUrl"),
+  noteTitle: document.getElementById("noteTitle"),
   draftDispatch: document.getElementById("draftDispatch"),
   publishDispatch: document.getElementById("publishDispatch"),
   loadUrl: document.getElementById("loadUrl"),
@@ -126,6 +128,7 @@ async function dispatchWorkflow({ publish }) {
   const ref = requiredValue("ref", "Branch");
   const token = requiredValue("token", "GitHub Token");
   const pageUrl = requiredValue("pageUrl", "Notion URL");
+  const noteTitle = fields.noteTitle.value.trim();
 
   await saveOptions();
   const response = await fetch(
@@ -141,6 +144,7 @@ async function dispatchWorkflow({ publish }) {
         ref,
         inputs: {
           notion_page_url: pageUrl,
+          note_title: noteTitle,
           publish: String(Boolean(publish)),
           dry_run_publish: "false",
           no_top_image: "false",

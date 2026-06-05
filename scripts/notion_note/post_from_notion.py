@@ -480,6 +480,17 @@ def _body_image_marker_lines(body_images: list[dict[str, Any]]) -> list[str]:
     return lines
 
 
+def _normalize_note_title(title: str) -> str:
+    return re.sub(r"\s+", " ", str(title or "")).strip()
+
+
+def _title_prefixed_h2(article_title: str, section_title: str) -> str:
+    normalized_title = _normalize_note_title(article_title)
+    if not normalized_title:
+        return f"## {section_title}"
+    return f"## {normalized_title}：{section_title}"
+
+
 def _build_article_template(
     title: str,
     body_markdown: str,
@@ -504,10 +515,10 @@ def _build_article_template(
     _append_template_lines(output_lines, [AFFILIATE_SLOT_TEMPLATE.format(index=1)])
     _append_template_lines(output_lines, [TOC_MARKER])
     _append_template_lines(output_lines, [DISCLOSURE_TEXT])
-    _append_template_lines(output_lines, ["## インサイトまとめ"])
+    _append_template_lines(output_lines, [_title_prefixed_h2(title, "インサイトまとめ")])
     _append_template_lines(output_lines, insight_lines, blank_before=False)
     _append_template_lines(output_lines, [AFFILIATE_SLOT_TEMPLATE.format(index=2)])
-    _append_template_lines(output_lines, ["## 詳細情報"])
+    _append_template_lines(output_lines, [_title_prefixed_h2(title, "詳細情報")])
     _append_template_lines(output_lines, detail_lines, blank_before=False)
     _append_template_lines(output_lines, [AFFILIATE_SLOT_TEMPLATE.format(index=3)])
     if youtube_url:
@@ -629,12 +640,14 @@ def _page_cover_image(page: dict[str, Any]) -> NotionImage | None:
     return NotionImage(url=url, caption="Notionカバー画像") if url else None
 
 
-def build_markdown_from_notion(client: NotionClient, page_id: str) -> tuple[str, dict[str, Any]]:
+def build_markdown_from_notion(client: NotionClient, page_id: str, note_title: str = "") -> tuple[str, dict[str, Any]]:
     page = client.retrieve_page(page_id)
-    title = _page_title(page)
+    notion_title = _page_title(page)
+    title = _normalize_note_title(note_title) or notion_title
     youtube_url = _extract_youtube_url_from_page(page)
     images: list[NotionImage] = []
     lines = _render_blocks(client, page_id, images, {"stop": False})
+    lines = _drop_duplicate_title_heading(lines, notion_title)
     lines = _drop_duplicate_title_heading(lines, title)
     body = "\n".join(lines).strip()
     body = _strip_frontmatter(body)
@@ -644,6 +657,8 @@ def build_markdown_from_notion(client: NotionClient, page_id: str) -> tuple[str,
     markdown = _build_article_template(title, body, youtube_url, body_images)
     return markdown, {
         "title": title,
+        "notion_title": notion_title,
+        "note_title_input": _normalize_note_title(note_title),
         "youtube_url": youtube_url,
         "image_count": len(images),
         "body_image_count": len(body_images),
@@ -756,18 +771,27 @@ def _write_result_json(path: Path, payload: dict[str, Any]) -> None:
 
 
 def _build_discord_x_template(note_url: str) -> str:
-    return f"【投資Youtube記録】\n\n{note_url}\n\n{DISCORD_X_TEMPLATE_TAGS}"
+    clean_url = _clean_discord_note_url(note_url)
+    return f"【投資Youtube記録】\n\n{clean_url}\n\n{DISCORD_X_TEMPLATE_TAGS}"
+
+
+def _clean_discord_note_url(note_url: str) -> str:
+    parsed = urlparse(str(note_url or ""))
+    if parsed.scheme and parsed.netloc:
+        return parsed._replace(params="", query="", fragment="").geturl()
+    return str(note_url or "").strip()
 
 
 def _notify_discord_after_publish(note_url: str) -> dict[str, Any]:
+    clean_note_url = _clean_discord_note_url(note_url)
     status: dict[str, Any] = {
         "attempted": False,
         "success": False,
         "webhook_configured": bool(DISCORD_WEBHOOK_URL),
-        "url": note_url,
+        "url": clean_note_url,
         "error": "",
     }
-    if not note_url:
+    if not clean_note_url:
         status["error"] = "公開後URLが空のためDiscord通知をスキップしました。"
         print(f"   [警告] {status['error']}")
         return status
@@ -777,7 +801,7 @@ def _notify_discord_after_publish(note_url: str) -> dict[str, Any]:
         return status
 
     status["attempted"] = True
-    message = _build_discord_x_template(note_url)
+    message = _build_discord_x_template(clean_note_url)
     try:
         response = requests.post(DISCORD_WEBHOOK_URL, json={"content": message}, timeout=15)
     except requests.RequestException as exc:
@@ -799,6 +823,7 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Notion記事をnoteへ投稿する")
     parser.add_argument("--page-id", default=os.getenv("NOTION_PAGE_ID", ""), help="NotionページID")
     parser.add_argument("--page-url", default=os.getenv("NOTION_PAGE_URL", ""), help="NotionページURL")
+    parser.add_argument("--note-title", default=os.getenv("NOTE_TITLE", ""), help="note投稿タイトル。空ならNotionタイトルを使う")
     parser.add_argument("--publish", action="store_true", help="下書き作成後に公開投稿まで進める")
     parser.add_argument("--dry-run-publish", action="store_true", help="公開画面まで進めるが最後の投稿ボタンは押さない")
     parser.add_argument("--no-ogp", action="store_true", help="OGP展開をスキップする")
@@ -822,7 +847,7 @@ def main() -> int:
     page_id = notion_id_from_url(raw_page_id)
 
     client = NotionClient(os.getenv("NOTION_API_KEY", ""))
-    markdown, preprocess = build_markdown_from_notion(client, page_id)
+    markdown, preprocess = build_markdown_from_notion(client, page_id, note_title=args.note_title)
     markdown, affiliate_insertions = _insert_affiliate_after_each_h2(
         markdown,
         affiliate_file=Path(args.affiliate_file),

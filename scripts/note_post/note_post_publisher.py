@@ -71,7 +71,15 @@ def _write_result_json(path: Path, payload: dict[str, Any]) -> None:
 
 
 def _build_discord_x_template(note_url: str) -> str:
-    return f"【投資Youtube記録】\n\n{note_url}\n\n{DISCORD_X_TEMPLATE_TAGS}"
+    clean_url = _clean_discord_note_url(note_url)
+    return f"【投資Youtube記録】\n\n{clean_url}\n\n{DISCORD_X_TEMPLATE_TAGS}"
+
+
+def _clean_discord_note_url(note_url: str) -> str:
+    parsed = urlparse(str(note_url or ""))
+    if parsed.scheme and parsed.netloc:
+        return parsed._replace(params="", query="", fragment="").geturl()
+    return str(note_url or "").strip()
 
 
 def _is_public_note_url(note_url: str) -> bool:
@@ -208,7 +216,7 @@ def notify_discord_after_publish(note_url: str) -> dict[str, Any]:
     if not reachability.get("ok"):
         status["warning"] = f"未ログイン公開確認は未確定ですが、公開URL形式を優先してDiscord通知します: {reachability}"
         print(f"   [警告] {status['warning']}")
-    note_url = str(reachability.get("final_url") or note_url)
+    note_url = _clean_discord_note_url(str(reachability.get("final_url") or note_url))
     status["url"] = note_url
     if not DISCORD_WEBHOOK_URL:
         status["error"] = "NOTION2NOTE_DISCORD_WEBHOOK が未設定のためDiscord通知をスキップしました。"
@@ -289,7 +297,7 @@ def publish_markdown_to_note(
                 return result
             result["publish_url_warning"] = f"未ログイン公開確認は未確定ですが、投稿後ブラウザURLを優先しました: {reachability}"
         result["success"] = True
-        result["published_url"] = str(reachability.get("final_url") or published_url)
+        result["published_url"] = _clean_discord_note_url(str(reachability.get("final_url") or published_url))
         result["discord_notification"] = notify_discord_after_publish(result["published_url"])
     else:
         result["discord_notification"] = {

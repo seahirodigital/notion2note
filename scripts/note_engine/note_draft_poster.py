@@ -83,6 +83,7 @@ NOTE_POST_TAGS = (
 # ── OGP展開設定 ────────────────────────────────────────
 NOTE_PUBLISH_SETTINGS_READY_TIMEOUT_MS = int(os.getenv("NOTE_PUBLISH_SETTINGS_READY_TIMEOUT_MS", "45000"))
 NOTE_PUBLISH_SETTINGS_READY_POLL_MS = int(os.getenv("NOTE_PUBLISH_SETTINGS_READY_POLL_MS", "500"))
+NOTE_PUBLISH_MAGAZINE_NAME = os.getenv("NOTE_PUBLISH_MAGAZINE_NAME", "投資Youtube学習記録")
 
 EDITOR_CONTENT_SELECTOR  = ".ProseMirror p, .ProseMirror h2, .ProseMirror h3"
 EDITOR_LOAD_TIMEOUT_SEC  = 60
@@ -1888,28 +1889,36 @@ def _fill_note_hashtags(page, tags: str) -> str:
     return f"{strategy}->{paste_strategy}"
 
 
-def _get_gadget_magazine_status(page) -> dict:
+def _xpath_literal(value: str) -> str:
+    if "'" not in value:
+        return f"'{value}'"
+    if '"' not in value:
+        return f'"{value}"'
+    return "concat(" + ', "\'", '.join(f"'{part}'" for part in value.split("'")) + ")"
+
+
+def _get_publish_magazine_status(page) -> dict:
     return page.evaluate(
         """
-        () => {
+        (magazineName) => {
           const normalize = (value) => (value || '').replace(/\\s+/g, ' ').trim();
           const isVisible = (el) => {
             const rect = el.getBoundingClientRect();
             const style = window.getComputedStyle(el);
             return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
           };
-          const buttonText = (el) => normalize(el.innerText || el.textContent || el.getAttribute('aria-label') || '');
+          const textOf = (el) => normalize(el.innerText || el.textContent || el.getAttribute('aria-label') || '');
+          const buttonText = (el) => textOf(el);
           const labels = Array.from(document.querySelectorAll('body *')).filter((el) => {
             if (!isVisible(el)) return false;
-            const text = normalize(el.innerText || el.textContent || '');
-            return text === 'ガジェット';
-          });
+            return textOf(el).includes(magazineName);
+          }).sort((a, b) => textOf(a).length - textOf(b).length);
 
           for (const label of labels) {
             let row = label;
             for (let depth = 0; row && depth < 8; depth += 1, row = row.parentElement) {
               const rowText = normalize(row.innerText || row.textContent || '');
-              if (!rowText.includes('ガジェット')) continue;
+              if (!rowText.includes(magazineName)) continue;
               if (!rowText.includes('追加') && !rowText.includes('追加済')) continue;
               const buttons = Array.from(row.querySelectorAll('button, [role="button"]')).filter(isVisible);
               const already = rowText.includes('追加済') || buttons.some((button) => buttonText(button).includes('追加済'));
@@ -1928,37 +1937,38 @@ def _get_gadget_magazine_status(page) -> dict:
           }
           return { found: false, already: false, canAdd: false, rowText: '' };
         }
-        """
+        """,
+        NOTE_PUBLISH_MAGAZINE_NAME,
     )
 
 
-def _click_gadget_magazine_by_dom(page) -> str:
+def _click_publish_magazine_by_dom(page) -> str:
     result = page.evaluate(
         """
-        () => {
+        (magazineName) => {
           const normalize = (value) => (value || '').replace(/\\s+/g, ' ').trim();
           const isVisible = (el) => {
             const rect = el.getBoundingClientRect();
             const style = window.getComputedStyle(el);
             return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
           };
-          const buttonText = (el) => normalize(el.innerText || el.textContent || el.getAttribute('aria-label') || '');
+          const textOf = (el) => normalize(el.innerText || el.textContent || el.getAttribute('aria-label') || '');
+          const buttonText = (el) => textOf(el);
           const labels = Array.from(document.querySelectorAll('body *')).filter((el) => {
             if (!isVisible(el)) return false;
-            const text = normalize(el.innerText || el.textContent || '');
-            return text === 'ガジェット';
-          });
+            return textOf(el).includes(magazineName);
+          }).sort((a, b) => textOf(a).length - textOf(b).length);
 
           for (const label of labels) {
             let row = label;
             for (let depth = 0; row && depth < 8; depth += 1, row = row.parentElement) {
               const rowText = normalize(row.innerText || row.textContent || '');
-              if (!rowText.includes('ガジェット')) continue;
+              if (!rowText.includes(magazineName)) continue;
               if (!rowText.includes('追加') && !rowText.includes('追加済')) continue;
               const buttons = Array.from(row.querySelectorAll('button, [role="button"]')).filter(isVisible);
               const already = rowText.includes('追加済') || buttons.some((button) => buttonText(button).includes('追加済'));
               if (already) {
-                return { ok: true, already: true, strategy: `dom_gadget_already_added_depth_${depth}`, rowText };
+                return { ok: true, already: true, strategy: `dom_publish_magazine_already_added_depth_${depth}`, rowText };
               }
               const addButton = buttons.find((button) => {
                 const text = buttonText(button);
@@ -1966,31 +1976,32 @@ def _click_gadget_magazine_by_dom(page) -> str:
               });
               if (addButton) {
                 addButton.click();
-                return { ok: true, already: false, strategy: `dom_gadget_row_add_depth_${depth}`, rowText };
+                return { ok: true, already: false, strategy: `dom_publish_magazine_row_add_depth_${depth}`, rowText };
               }
             }
           }
-          return { ok: false, already: false, strategy: '', rowText: '', reason: 'ガジェット行の追加ボタンが見つかりません' };
+          return { ok: false, already: false, strategy: '', rowText: '', reason: `${magazineName}行の追加ボタンが見つかりません` };
         }
-        """
+        """,
+        NOTE_PUBLISH_MAGAZINE_NAME,
     )
     if not result.get("ok"):
-        raise RuntimeError(result.get("reason") or "ガジェット行の追加ボタンが見つかりません")
+        raise RuntimeError(result.get("reason") or f"{NOTE_PUBLISH_MAGAZINE_NAME}行の追加ボタンが見つかりません")
     page.wait_for_timeout(1500)
-    return result.get("strategy") or "dom_gadget_row_add"
+    return result.get("strategy") or "dom_publish_magazine_row_add"
 
 
-def _wait_for_gadget_magazine_added(page) -> dict:
+def _wait_for_publish_magazine_added(page) -> dict:
     status = {}
     for _ in range(12):
-        status = _get_gadget_magazine_status(page)
+        status = _get_publish_magazine_status(page)
         if status.get("already"):
             return status
         page.wait_for_timeout(500)
-    raise RuntimeError(f"ガジェットマガジンの追加済みを確認できませんでした: {status}")
+    raise RuntimeError(f"{NOTE_PUBLISH_MAGAZINE_NAME}マガジンの追加済みを確認できませんでした: {status}")
 
 
-def _add_gadget_magazine(page) -> str:
+def _add_publish_magazine(page) -> str:
     tab_strategy = ""
     try:
         tab_strategy = _click_visible_candidate(
@@ -2008,49 +2019,52 @@ def _add_gadget_magazine(page) -> str:
     except Exception as exc:
         print(f"   ⚠️ マガジンタブのクリックをスキップします: {exc}")
 
-    status = _get_gadget_magazine_status(page)
+    status = _get_publish_magazine_status(page)
     if status.get("already"):
-        strategy = "gadget_already_added"
-        print(f"   ✅ ガジェットマガジンは既に追加済みです: {status.get('rowText', '')[:80]}")
+        strategy = "publish_magazine_already_added"
+        print(f"   ✅ {NOTE_PUBLISH_MAGAZINE_NAME}マガジンは既に追加済みです: {status.get('rowText', '')[:80]}")
         return f"{tab_strategy}->{strategy}" if tab_strategy else strategy
 
     try:
-        strategy = _click_gadget_magazine_by_dom(page)
+        strategy = _click_publish_magazine_by_dom(page)
     except Exception as dom_exc:
-        print(f"   ⚠️ DOM指定でのガジェット追加に失敗しました。XPathで再試行します: {dom_exc}")
+        print(f"   ⚠️ DOM指定での{NOTE_PUBLISH_MAGAZINE_NAME}追加に失敗しました。XPathで再試行します: {dom_exc}")
+        magazine_name_xpath = _xpath_literal(NOTE_PUBLISH_MAGAZINE_NAME)
+        add_xpath = _xpath_literal("追加")
+        added_xpath = _xpath_literal("追加済")
         strategy, locator = _find_visible_candidate(
             candidates=[
                 (
-                    "xpath_gadget_exact_row_add_button",
+                    "xpath_publish_magazine_exact_row_add_button",
                     page.locator(
-                        "xpath=//*[normalize-space(.)='ガジェット']"
-                        "/ancestor::*[self::div or self::li or self::section][.//button[normalize-space(.)='追加']][1]"
-                        "//button[normalize-space(.)='追加']"
+                        f"xpath=//*[normalize-space(.)={magazine_name_xpath}]"
+                        f"/ancestor::*[self::div or self::li or self::section][.//button[normalize-space(.)={add_xpath}]][1]"
+                        f"//button[normalize-space(.)={add_xpath}]"
                     ),
                 ),
                 (
-                    "xpath_gadget_row_add_button",
+                    "xpath_publish_magazine_row_add_button",
                     page.locator(
-                        "xpath=//*[contains(normalize-space(.), 'ガジェット')]"
-                        "/ancestor::*[self::div or self::li or self::section][.//button[contains(normalize-space(.), '追加')]][1]"
-                        "//button[contains(normalize-space(.), '追加') and not(contains(normalize-space(.), '追加済'))]"
+                        f"xpath=//*[contains(normalize-space(.), {magazine_name_xpath})]"
+                        f"/ancestor::*[self::div or self::li or self::section][.//button[contains(normalize-space(.), {add_xpath})]][1]"
+                        f"//button[contains(normalize-space(.), {add_xpath}) and not(contains(normalize-space(.), {added_xpath}))]"
                     ),
                 ),
                 (
-                    "xpath_gadget_following_add_button",
+                    "xpath_publish_magazine_following_add_button",
                     page.locator(
-                        "xpath=//*[normalize-space(.)='ガジェット']"
-                        "/following::button[normalize-space(.)='追加'][1]"
+                        f"xpath=//*[normalize-space(.)={magazine_name_xpath}]"
+                        f"/following::button[normalize-space(.)={add_xpath}][1]"
                     ),
                 ),
             ],
-            description="ガジェットマガジン追加",
+            description=f"{NOTE_PUBLISH_MAGAZINE_NAME}マガジン追加",
             timeout_ms=5000,
         )
-        _click_locator_with_fallback(page, locator, strategy, "ガジェットマガジン追加", timeout_ms=5000)
+        _click_locator_with_fallback(page, locator, strategy, f"{NOTE_PUBLISH_MAGAZINE_NAME}マガジン追加", timeout_ms=5000)
 
-    added_status = _wait_for_gadget_magazine_added(page)
-    print(f"   ✅ ガジェットマガジン追加完了: {strategy} / {added_status.get('rowText', '')[:80]}")
+    added_status = _wait_for_publish_magazine_added(page)
+    print(f"   ✅ {NOTE_PUBLISH_MAGAZINE_NAME}マガジン追加完了: {strategy} / {added_status.get('rowText', '')[:80]}")
     return f"{tab_strategy}->{strategy}" if tab_strategy else strategy
 
 
@@ -2098,7 +2112,7 @@ def _publish_editor_page(page, tags: str = NOTE_POST_TAGS, dry_run: bool = False
     result["publish_next_strategy"] = _click_publish_next(page)
     result["publish_settings_ready_strategy"] = _wait_for_publish_settings_ready(page)
     result["tag_strategy"] = _fill_note_hashtags(page, tags)
-    result["magazine_strategy"] = _add_gadget_magazine(page)
+    result["magazine_strategy"] = _add_publish_magazine(page)
     result["post_strategy"] = _click_final_post_button(page, dry_run=dry_run)
     page.wait_for_timeout(5000)
     result["final_url"] = page.url

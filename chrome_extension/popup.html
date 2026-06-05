@@ -16,16 +16,11 @@
         </nav>
       </header>
 
-      <section class="action-panel" aria-label="Actions起動">
-        <button id="dispatch">Actionsを起動</button>
+      <section class="action-panel" aria-label="投稿操作">
+        <button id="draftDispatch" type="button">下書き投稿</button>
+        <button id="publishDispatch" class="publish-button" type="button">本番投稿</button>
         <p id="status" role="status"></p>
       </section>
-
-      <div class="checks">
-        <label><input id="publish" type="checkbox"> 公開まで進める</label>
-        <label><input id="dryRunPublish" type="checkbox"> 投稿ボタン直前で止める</label>
-        <label><input id="noTopImage" type="checkbox"> トップ画像をスキップ</label>
-      </div>
 
       <label>
         Notion URL

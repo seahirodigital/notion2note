@@ -59,8 +59,13 @@ h1 {
 
 .action-panel {
   display: grid;
+  grid-template-columns: 1fr 1fr;
   gap: 8px;
   margin-bottom: 10px;
+}
+
+.action-panel #status {
+  grid-column: 1 / -1;
 }
 
 label {
@@ -79,29 +84,6 @@ input {
   padding: 0 9px;
   font: inherit;
   background: #fff;
-}
-
-.checks {
-  display: grid;
-  gap: 6px;
-  margin: 10px 0 12px;
-  padding: 10px;
-  border: 1px solid #deded8;
-  border-radius: 6px;
-  background: #fff;
-}
-
-.checks label {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin: 0;
-  font-weight: 500;
-}
-
-.checks input {
-  width: auto;
-  min-height: 0;
 }
 
 .url-row {
@@ -126,6 +108,10 @@ button {
   font: inherit;
   font-weight: 700;
   cursor: pointer;
+}
+
+.publish-button {
+  background: #15803d;
 }
 
 .secondary-button {

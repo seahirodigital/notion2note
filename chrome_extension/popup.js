@@ -5,13 +5,9 @@ const DEFAULTS = {
   ref: "main",
   token: "",
   pageUrl: "",
-  publish: false,
-  dryRunPublish: false,
-  noTopImage: false,
 };
 
 const TEXT_KEYS = ["owner", "repo", "workflow", "ref", "token", "pageUrl"];
-const CHECK_KEYS = ["publish", "dryRunPublish", "noTopImage"];
 const ONEDRIVE_REPO_DIR = "C:\\Users\\mahha\\OneDrive\\開発\\notion2note";
 const QUICK_LINK_PATHS = {
   affiliate: `${ONEDRIVE_REPO_DIR}\\affiliate_links.txt`,
@@ -25,10 +21,8 @@ const fields = {
   ref: document.getElementById("ref"),
   token: document.getElementById("token"),
   pageUrl: document.getElementById("pageUrl"),
-  publish: document.getElementById("publish"),
-  dryRunPublish: document.getElementById("dryRunPublish"),
-  noTopImage: document.getElementById("noTopImage"),
-  dispatch: document.getElementById("dispatch"),
+  draftDispatch: document.getElementById("draftDispatch"),
+  publishDispatch: document.getElementById("publishDispatch"),
   loadUrl: document.getElementById("loadUrl"),
   status: document.getElementById("status"),
   affiliateLink: document.getElementById("affiliateLink"),
@@ -45,9 +39,6 @@ function storagePayload() {
   const payload = {};
   for (const key of TEXT_KEYS) {
     payload[key] = fields[key].value.trim();
-  }
-  for (const key of CHECK_KEYS) {
-    payload[key] = fields[key].checked;
   }
   return payload;
 }
@@ -110,9 +101,6 @@ async function loadOptions() {
   for (const key of TEXT_KEYS) {
     fields[key].value = stored[key] ?? DEFAULTS[key];
   }
-  for (const key of CHECK_KEYS) {
-    fields[key].checked = Boolean(stored[key]);
-  }
   updateQuickLinks();
   await refreshCurrentTabUrl(false);
   updateQuickLinks();
@@ -126,7 +114,12 @@ function requiredValue(key, label) {
   return value;
 }
 
-async function dispatchWorkflow() {
+function setPostingButtonsDisabled(disabled) {
+  fields.draftDispatch.disabled = disabled;
+  fields.publishDispatch.disabled = disabled;
+}
+
+async function dispatchWorkflow({ publish }) {
   const owner = requiredValue("owner", "GitHub Owner");
   const repo = requiredValue("repo", "Repository");
   const workflow = requiredValue("workflow", "Workflow");
@@ -148,9 +141,9 @@ async function dispatchWorkflow() {
         ref,
         inputs: {
           notion_page_url: pageUrl,
-          publish: String(fields.publish.checked),
-          dry_run_publish: String(fields.dryRunPublish.checked),
-          no_top_image: String(fields.noTopImage.checked),
+          publish: String(Boolean(publish)),
+          dry_run_publish: "false",
+          no_top_image: "false",
         },
       }),
     }
@@ -171,12 +164,6 @@ for (const key of TEXT_KEYS) {
   });
 }
 
-for (const key of CHECK_KEYS) {
-  fields[key].addEventListener("change", () => {
-    saveOptions().catch((error) => setStatus(error?.message || String(error)));
-  });
-}
-
 fields.loadUrl.addEventListener("click", async () => {
   fields.loadUrl.disabled = true;
   try {
@@ -189,16 +176,29 @@ fields.loadUrl.addEventListener("click", async () => {
   }
 });
 
-fields.dispatch.addEventListener("click", async () => {
-  fields.dispatch.disabled = true;
-  setStatus("Actionsを起動しています...");
+fields.draftDispatch.addEventListener("click", async () => {
+  setPostingButtonsDisabled(true);
+  setStatus("下書き投稿を開始しています...");
   try {
-    await dispatchWorkflow();
-    setStatus("GitHub Actionsを起動しました。");
+    await dispatchWorkflow({ publish: false });
+    setStatus("下書き投稿を開始しました。");
   } catch (error) {
     setStatus(error?.message || String(error));
   } finally {
-    fields.dispatch.disabled = false;
+    setPostingButtonsDisabled(false);
+  }
+});
+
+fields.publishDispatch.addEventListener("click", async () => {
+  setPostingButtonsDisabled(true);
+  setStatus("本番投稿を開始しています...");
+  try {
+    await dispatchWorkflow({ publish: true });
+    setStatus("本番投稿を開始しました。完了後にDiscordへ通知します。");
+  } catch (error) {
+    setStatus(error?.message || String(error));
+  } finally {
+    setPostingButtonsDisabled(false);
   }
 });
 

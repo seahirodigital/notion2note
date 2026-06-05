@@ -30,6 +30,7 @@ DEFAULT_RESULT_JSON = Path(tempfile.gettempdir()) / "notion_note_result.json"
 
 NOTION_API_BASE = "https://api.notion.com/v1"
 NOTION_VERSION = os.getenv("NOTION_VERSION", "2022-06-28")
+DISCORD_WEBHOOK_URL = os.getenv("NOTION2NOTE_DISCORD_WEBHOOK", "").strip()
 RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
 RETRY_DELAYS = (1.5, 3, 6)
 
@@ -47,6 +48,7 @@ BODY_IMAGE_MARKER_TEMPLATE = "[[NOTION_NOTE_BODY_IMAGE_{index:03d}]]"
 AFFILIATE_SLOT_TEMPLATE = "[[NOTION_NOTE_AFFILIATE_{index:03d}]]"
 AFFILIATE_SLOT_RE = re.compile(r"\[\[NOTION_NOTE_AFFILIATE_(\d{3})\]\]")
 TOC_MARKER = "[[NOTION_NOTE_TOC]]"
+DISCORD_X_TEMPLATE_TAGS = "#投資初心者 #投資 #デイトレ #日本株 #日経平均 #米国株 #高配当 #FX #ドル円"
 
 
 @dataclass
@@ -734,6 +736,46 @@ def _write_result_json(path: Path, payload: dict[str, Any]) -> None:
     print(f"   [情報] 結果JSONを書き出しました: {path}")
 
 
+def _build_discord_x_template(note_url: str) -> str:
+    return f"【投資Youtube記録】\n\n{note_url}\n\n{DISCORD_X_TEMPLATE_TAGS}"
+
+
+def _notify_discord_after_publish(note_url: str) -> dict[str, Any]:
+    status: dict[str, Any] = {
+        "attempted": False,
+        "success": False,
+        "webhook_configured": bool(DISCORD_WEBHOOK_URL),
+        "url": note_url,
+        "error": "",
+    }
+    if not note_url:
+        status["error"] = "公開後URLが空のためDiscord通知をスキップしました。"
+        print(f"   [警告] {status['error']}")
+        return status
+    if not DISCORD_WEBHOOK_URL:
+        status["error"] = "NOTION2NOTE_DISCORD_WEBHOOK が未設定のためDiscord通知をスキップしました。"
+        print(f"   [情報] {status['error']}")
+        return status
+
+    status["attempted"] = True
+    message = _build_discord_x_template(note_url)
+    try:
+        response = requests.post(DISCORD_WEBHOOK_URL, json={"content": message}, timeout=15)
+    except requests.RequestException as exc:
+        status["error"] = str(exc)
+        print(f"   [警告] Discord通知に失敗しました: {exc}")
+        return status
+
+    if response.ok:
+        status["success"] = True
+        print("   [OK] Discordへ本番投稿通知を送信しました")
+        return status
+
+    status["error"] = f"Discord API {response.status_code}: {response.text[:300]}"
+    print(f"   [警告] Discord通知に失敗しました: {status['error']}")
+    return status
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Notion記事をnoteへ投稿する")
     parser.add_argument("--page-id", default=os.getenv("NOTION_PAGE_ID", ""), help="NotionページID")
@@ -820,6 +862,16 @@ def main() -> int:
         "body_image_upload_count": len(body_image_uploads),
         "deleted_temp_image_paths": deleted_temp_images,
     }
+    if args.publish and not args.dry_run_publish and result.get("success"):
+        result["discord_notification"] = _notify_discord_after_publish(str(result.get("published_url") or ""))
+    else:
+        result["discord_notification"] = {
+            "attempted": False,
+            "success": False,
+            "webhook_configured": bool(DISCORD_WEBHOOK_URL),
+            "url": "",
+            "error": "本番投稿ではないためDiscord通知をスキップしました。",
+        }
     _write_result_json(Path(args.result_json), result)
 
     if result.get("success"):

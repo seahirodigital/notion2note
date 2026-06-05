@@ -73,6 +73,8 @@ GitHubリポジトリ `seahirodigital/notion2note` の `Settings` → `Secrets a
   - noteログイン済みCookieのStorage State JSONです。取得方法は後述の `NOTE_STORAGE_STATE の取得方法` を参照してください。
 - `GH_PAT`
   - GitHub Actions workflow起動、Secret更新、Variable保存に使うGitHub Personal Access Tokenです。取得方法は後述の `GH_PAT の取得方法` を参照してください。
+- `NOTION2NOTE_DISCORD_WEBHOOK`
+  - 本番投稿成功後にX投稿用テンプレを通知するDiscord Webhook URLです。GitHubリポジトリ `seahirodigital/notion2note` の `Settings` → `Secrets and variables` → `Actions` → `Secrets` に登録します。
 
 ### NOTION_API_KEY の取得方法
 
@@ -251,6 +253,22 @@ C:\Users\mahha\OneDrive\開発\notion2note\tag.md
 
 既存のタグをそのままコピー済みです。あとからこのファイルの中身だけを書き換えれば、note投稿時のタグを変更できます。
 
+公開投稿時は、`C:\Users\mahha\OneDrive\開発\notion2note\tag.md` の内容をハッシュタグとして入力し、公開設定のマガジンタブで `投資Youtube学習記録` の `追加` ボタンを押します。
+
+## Discord通知
+
+`本番投稿` で公開投稿が成功すると、GitHub Actions Secret `NOTION2NOTE_DISCORD_WEBHOOK` に設定したDiscord Webhookへ、Xへそのまま貼り付けるためのテンプレを通知します。
+
+通知内容:
+
+```text
+【投資Youtube記録】
+
+note公開後URL
+
+#投資初心者 #投資 #デイトレ #日本株 #日経平均 #米国株 #高配当 #FX #ドル円
+```
+
 タグはスペース、カンマ、読点で区切れます。`#` は付けても付けなくても構いません。
 
 例:
@@ -291,7 +309,9 @@ Chrome拡張の入力値:
 - `Notion URL`
   - 通常は現在開いているタブのURLが自動入力されます。
 
-`Actionsを起動` を押すと、GitHub Actions の `C:\Users\mahha\OneDrive\開発\notion2note\.github\workflows\notion-note-post.yml` が起動します。
+`下書き投稿` を押すと、GitHub Actions の `C:\Users\mahha\OneDrive\開発\notion2note\.github\workflows\notion-note-post.yml` が下書き投稿モードで起動します。
+
+`本番投稿` を押すと、同じworkflowが公開投稿モードで起動します。本番投稿では `C:\Users\mahha\OneDrive\開発\notion2note\tag.md` のタグ入力、`投資Youtube学習記録` マガジン追加、公開投稿、Discord通知まで進めます。
 
 ## GitHub Actions から手動実行する方法
 

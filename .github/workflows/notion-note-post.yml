@@ -124,6 +124,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GH_PAT }}
           NOTION_PAGE_ID: ${{ inputs.notion_page_id }}
           NOTION_PAGE_URL: ${{ inputs.notion_page_url }}
+          NOTION2NOTE_DISCORD_WEBHOOK: ${{ secrets.NOTION2NOTE_DISCORD_WEBHOOK }}
         run: |
           ARGS=(
             --result-json "$RUNNER_TEMP/notion_note_result.json"

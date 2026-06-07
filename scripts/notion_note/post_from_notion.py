@@ -42,6 +42,10 @@ DISCLOSURE_TEXT = (
     "文章にはAIの整形・編集が含まれます。"
 )
 YOUTUBE_RE = re.compile(r"https?://(?:www\.)?(?:youtube\.com|youtu\.be)/\S+", re.IGNORECASE)
+AMAZON_AFFILIATE_URL_RE = re.compile(
+    r"https?://(?:amzn\.to|(?:www\.)?amazon\.co\.jp)/[^\s\n\r<>\"']+",
+    re.IGNORECASE,
+)
 NOTION_ID_RE = re.compile(r"(?i)([0-9a-f]{32})")
 NOTION_UUID_RE = re.compile(
     r"(?i)([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"
@@ -561,6 +565,11 @@ def _normalize_markdown_blank_lines(markdown: str) -> str:
     return re.sub(r"\n{3,}", "\n\n", str(markdown or "")).strip() + "\n"
 
 
+def _extract_first_affiliate_url(markdown: str) -> str:
+    match = AMAZON_AFFILIATE_URL_RE.search(str(markdown or ""))
+    return match.group(0).rstrip(").,、。]") if match else ""
+
+
 def _remove_affiliate_slots(markdown: str) -> str:
     return _normalize_markdown_blank_lines(AFFILIATE_SLOT_RE.sub("", markdown))
 
@@ -855,6 +864,9 @@ def main() -> int:
         per_h2_count=max(0, args.affiliate_count),
         seed=args.affiliate_seed,
     )
+    body_image_link_url = _extract_first_affiliate_url(markdown)
+    if preprocess.get("body_image_count") and affiliate_insertions > 0 and not body_image_link_url:
+        raise RuntimeError("ページ先頭のAmazonアフィリエイトURLを取得できませんでした。")
     if args.no_toc:
         markdown = _normalize_markdown_blank_lines(markdown.replace(TOC_MARKER, ""))
     tags = _read_tags(Path(args.tag_file))
@@ -867,6 +879,8 @@ def main() -> int:
         top_image_path, top_image_source = _download_image(preprocess["top_image_url"], label="トップ画像")
         temp_image_paths.append(top_image_path)
     body_image_uploads, body_image_sources = _download_body_images(preprocess.get("body_images") or [])
+    for body_image_upload in body_image_uploads:
+        body_image_upload["link_url"] = body_image_link_url
     temp_image_paths.extend(Path(item["path"]) for item in body_image_uploads if item.get("path"))
 
     if args.dump_markdown:
@@ -917,6 +931,7 @@ def main() -> int:
         "top_image_path": str(top_image_path) if top_image_path else "",
         "body_image_sources": body_image_sources,
         "body_image_upload_count": len(body_image_uploads),
+        "body_image_link_url": body_image_link_url,
         "deleted_temp_image_paths": deleted_temp_images,
     }
     if "discord_notification" not in result:

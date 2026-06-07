@@ -833,6 +833,226 @@ def _wait_for_uploaded_image_ready(page, previous_count: int, timeout_sec: int =
     return _count_page_images(page), "timeout"
 
 
+def _mark_existing_editor_images(page, snapshot_token: str) -> dict:
+    return page.evaluate(
+        """
+        (snapshotToken) => {
+          const editor = document.querySelector('.note-editable, [contenteditable="true"]') || document.querySelector('.ProseMirror');
+          if (!editor) return { success: false, reason: 'editor_not_found', count: 0 };
+          const images = Array.from(editor.querySelectorAll('img'));
+          window.__notion2noteImageSnapshots = window.__notion2noteImageSnapshots || {};
+          window.__notion2noteImageSnapshots[snapshotToken] = images.map(
+            (image) => image.currentSrc || image.src || ''
+          );
+          images.forEach((image) => image.setAttribute('data-notion2note-image-snapshot', snapshotToken));
+          return { success: true, count: images.length };
+        }
+        """,
+        snapshot_token,
+    )
+
+
+def _clear_body_image_markers(page, snapshot_token: str) -> None:
+    page.evaluate(
+        """
+        (snapshotToken) => {
+          document.querySelectorAll(
+            `img[data-notion2note-image-snapshot="${snapshotToken}"], ` +
+            `img[data-notion2note-link-target="${snapshotToken}"]`
+          ).forEach((image) => {
+            image.removeAttribute('data-notion2note-image-snapshot');
+            image.removeAttribute('data-notion2note-link-target');
+          });
+          if (window.__notion2noteImageSnapshots) {
+            delete window.__notion2noteImageSnapshots[snapshotToken];
+          }
+        }
+        """,
+        snapshot_token,
+    )
+
+
+def _select_new_body_image(page, snapshot_token: str) -> dict:
+    target = page.evaluate(
+        """
+        (snapshotToken) => {
+          const editor = document.querySelector('.note-editable, [contenteditable="true"]') || document.querySelector('.ProseMirror');
+          if (!editor) return { success: false, reason: 'editor_not_found' };
+          const isVisible = (element) => {
+            const rect = element.getBoundingClientRect();
+            const style = window.getComputedStyle(element);
+            return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+          };
+          const previousSources = new Set(
+            (window.__notion2noteImageSnapshots && window.__notion2noteImageSnapshots[snapshotToken]) || []
+          );
+          const unmarkedImages = Array.from(editor.querySelectorAll('img'))
+            .filter((image) => image.getAttribute('data-notion2note-image-snapshot') !== snapshotToken)
+            .filter(isVisible);
+          const sourceNovelImages = unmarkedImages.filter(
+            (image) => !previousSources.has(image.currentSrc || image.src || '')
+          );
+          const candidateImages = sourceNovelImages.length ? sourceNovelImages : unmarkedImages;
+          const candidates = candidateImages
+            .map((image) => {
+              const rect = image.getBoundingClientRect();
+              return { image, rect, area: rect.width * rect.height };
+            })
+            .sort((a, b) => b.area - a.area || a.rect.top - b.rect.top);
+          const selected = candidates[0];
+          if (!selected) return { success: false, reason: 'new_image_not_found' };
+          selected.image.setAttribute('data-notion2note-link-target', snapshotToken);
+          selected.image.scrollIntoView({ block: 'center', inline: 'nearest' });
+          return {
+            success: true,
+            src: selected.image.currentSrc || selected.image.src || '',
+            width: selected.rect.width,
+            height: selected.rect.height,
+          };
+        }
+        """,
+        snapshot_token,
+    )
+    if not target.get("success"):
+        return target
+
+    locator = page.locator(f'img[data-notion2note-link-target="{snapshot_token}"]').first
+    _click_locator_with_fallback(
+        page,
+        locator,
+        f"body_image_target:{snapshot_token}",
+        "リンク設定対象の本文画像",
+        timeout_ms=5000,
+    )
+    page.wait_for_timeout(700)
+    return target
+
+
+def _click_body_image_link_button(page) -> str:
+    return _click_visible_candidate(
+        page,
+        candidates=[
+            ("role_button_リンク", page.get_by_role("button", name=re.compile(r"リンク"))),
+            ("button_aria_label_リンク", page.locator('button[aria-label*="リンク"]')),
+            ("button_title_リンク", page.locator('button[title*="リンク"]')),
+            ("button_data_tooltip_リンク", page.locator('button[data-tooltip*="リンク"]')),
+            ("role_button_aria_label_リンク", page.locator('[role="button"][aria-label*="リンク"]')),
+            ("role_button_title_リンク", page.locator('[role="button"][title*="リンク"]')),
+            ("role_button_data_tooltip_リンク", page.locator('[role="button"][data-tooltip*="リンク"]')),
+        ],
+        description="本文画像ツールバーのリンク",
+        timeout_ms=5000,
+    )
+
+
+def _fill_body_image_link_url(page, link_url: str) -> str:
+    strategy, locator = _find_visible_candidate(
+        [
+            ("input_type_url", page.locator('input[type="url"]')),
+            ("input_placeholder_URL", page.locator('input[placeholder*="URL"]')),
+            ("input_placeholder_https", page.locator('input[placeholder*="https"]')),
+            ("input_aria_label_URL", page.locator('input[aria-label*="URL"]')),
+            ("input_inputmode_url", page.locator('input[inputmode="url"]')),
+            ("role_textbox_URL", page.get_by_role("textbox", name=re.compile(r"URL|リンク"))),
+        ],
+        "本文画像リンクURL入力欄",
+        timeout_ms=5000,
+    )
+    locator.scroll_into_view_if_needed()
+    try:
+        locator.fill(link_url)
+    except Exception:
+        locator.click()
+        page.keyboard.press("Control+a")
+        page.keyboard.type(link_url)
+    locator.press("Enter")
+    page.wait_for_timeout(1200)
+    return strategy
+
+
+def _wait_for_body_image_link(page, snapshot_token: str, image_src: str, link_url: str, timeout_sec: int = 10) -> dict:
+    last_result = {}
+    for _ in range(timeout_sec * 2):
+        last_result = page.evaluate(
+            """
+            ({ snapshotToken, imageSrc, linkUrl }) => {
+              const editor = document.querySelector('.note-editable, [contenteditable="true"]') || document.querySelector('.ProseMirror');
+              if (!editor) return { success: false, reason: 'editor_not_found', href: '' };
+              let image = editor.querySelector(`img[data-notion2note-link-target="${snapshotToken}"]`);
+              if (!image && imageSrc) {
+                image = Array.from(editor.querySelectorAll('img')).find((candidate) => {
+                  return (candidate.currentSrc || candidate.src || '') === imageSrc;
+                });
+              }
+              if (!image) return { success: false, reason: 'target_image_not_found', href: '' };
+              let anchor = image.closest('a[href]');
+              let ancestor = image.parentElement;
+              for (let depth = 0; !anchor && ancestor && ancestor !== editor && depth < 8; depth += 1) {
+                anchor = Array.from(ancestor.querySelectorAll('a[href]')).find((candidate) => candidate.contains(image)) || null;
+                ancestor = ancestor.parentElement;
+              }
+              const href = anchor ? (anchor.getAttribute('href') || anchor.href || '') : '';
+              let matches = href === linkUrl;
+              if (!matches && href) {
+                try {
+                  matches = new URL(href, location.href).href === new URL(linkUrl, location.href).href;
+                } catch {}
+              }
+              return {
+                success: Boolean(anchor && matches),
+                reason: anchor ? 'href_mismatch' : 'anchor_not_found',
+                href,
+              };
+            }
+            """,
+            {
+                "snapshotToken": snapshot_token,
+                "imageSrc": image_src,
+                "linkUrl": link_url,
+            },
+        )
+        if last_result.get("success"):
+            return last_result
+        page.wait_for_timeout(500)
+    return last_result
+
+
+def _attach_link_to_new_body_image(page, snapshot_token: str, link_url: str) -> dict:
+    result = {
+        "success": False,
+        "url": link_url,
+        "snapshot_token": snapshot_token,
+    }
+    try:
+        target = _select_new_body_image(page, snapshot_token)
+        result["target"] = target
+        if not target.get("success"):
+            raise RuntimeError(target.get("reason") or "追加した本文画像を特定できません")
+        result["link_button_strategy"] = _click_body_image_link_button(page)
+        result["url_input_strategy"] = _fill_body_image_link_url(page, link_url)
+        result["verification"] = _wait_for_body_image_link(
+            page,
+            snapshot_token=snapshot_token,
+            image_src=str(target.get("src") or ""),
+            link_url=link_url,
+        )
+        if not result["verification"].get("success"):
+            raise RuntimeError(
+                "本文画像へのリンク適用を確認できませんでした: "
+                f"{result['verification'].get('reason', '')}"
+            )
+        result["success"] = True
+        return result
+    except Exception as exc:
+        result["error"] = str(exc)
+        return result
+    finally:
+        try:
+            _clear_body_image_markers(page, snapshot_token)
+        except Exception:
+            pass
+
+
 def _save_editor_draft(page) -> str:
     strategy = _click_visible_candidate(
         page,
@@ -1514,6 +1734,8 @@ def _attach_body_images_to_page(
         "success": True,
         "requested_count": len(uploads),
         "uploaded_count": 0,
+        "linked_count": 0,
+        "link_required": any(str(item.get("link_url") or "").strip() for item in uploads),
         "items": [],
         "failures": [],
     }
@@ -1524,6 +1746,7 @@ def _attach_body_images_to_page(
     print(f"   🖼️ Notion本文画像をnote画像ブロックとして添付します: {len(uploads)}件")
     cleanup_candidates: list[str] = []
     for index, item in enumerate(uploads, start=1):
+        snapshot_token = ""
         marker = str(item.get("marker") or "")
         image_path = Path(str(item.get("path") or ""))
         item_cleanup_candidates = _body_image_text_candidates(item)
@@ -1534,6 +1757,7 @@ def _attach_body_images_to_page(
             "path": str(image_path),
             "source": str(item.get("source") or ""),
             "cleanup_candidates": item_cleanup_candidates,
+            "link_url": str(item.get("link_url") or "").strip(),
             "success": False,
         }
         try:
@@ -1547,6 +1771,13 @@ def _attach_body_images_to_page(
             if not marker_result.get("ok"):
                 raise RuntimeError(marker_result.get("reason") or "本文画像マーカーを特定できません")
 
+            snapshot_token = f"body-image-{index}-{int(time.time() * 1000)}"
+            item_result["image_snapshot"] = _mark_existing_editor_images(page, snapshot_token)
+            if not item_result["image_snapshot"].get("success"):
+                raise RuntimeError(
+                    item_result["image_snapshot"].get("reason")
+                    or "本文画像追加前の画像状態を取得できません"
+                )
             before_count = _count_page_images(page)
             item_result["before_image_count"] = before_count
             page.keyboard.press("Backspace")
@@ -1571,9 +1802,24 @@ def _attach_body_images_to_page(
             if ready_image_count <= before_count:
                 raise RuntimeError("本文画像の挿入完了を確認できませんでした")
 
-            item_result["success"] = True
+            item_result["upload_success"] = True
             result["uploaded_count"] += 1
             print(f"   ✅ 本文画像添付完了: {index}/{len(uploads)}")
+
+            if item_result["link_url"]:
+                item_result["link"] = _attach_link_to_new_body_image(
+                    page,
+                    snapshot_token=snapshot_token,
+                    link_url=item_result["link_url"],
+                )
+                if not item_result["link"].get("success"):
+                    raise RuntimeError("本文画像へのアフィリエイトリンク設定に失敗しました")
+                result["linked_count"] += 1
+                print(f"   ✅ 本文画像リンク設定完了: {index}/{len(uploads)}")
+            else:
+                item_result["link"] = {"success": False, "strategy": "skipped_no_link_url"}
+
+            item_result["success"] = True
             page.wait_for_timeout(800)
         except Exception as exc:
             item_result["error"] = str(exc)
@@ -1582,6 +1828,11 @@ def _attach_body_images_to_page(
             print(f"   ⚠️ 本文画像添付に失敗しました: {index}/{len(uploads)} / {exc}")
             try:
                 page.keyboard.press("Escape")
+            except Exception:
+                pass
+        if snapshot_token:
+            try:
+                _clear_body_image_markers(page, snapshot_token)
             except Exception:
                 pass
         result["items"].append(item_result)
@@ -3746,6 +3997,10 @@ def _run_ogp_expansion_on_draft(
             result["toc"] = {"success": False, "strategy": "skipped_by_option"}
             print("   ⏭️ 目次挿入はオプション指定によりスキップします")
 
+        body_image_links_required = any(
+            str(item.get("link_url") or "").strip()
+            for item in (body_image_uploads or [])
+        )
         try:
             result["body_images"] = _attach_body_images_to_page(
                 page,
@@ -3753,8 +4008,17 @@ def _run_ogp_expansion_on_draft(
                 artifacts_dir=artifacts_dir,
             )
         except Exception as e:
-            result["body_images"] = {"success": False, "error": str(e)}
+            result["body_images"] = {
+                "success": False,
+                "link_required": body_image_links_required,
+                "error": str(e),
+            }
             print(f"   ⚠️ 本文画像添付エラー: {e}")
+
+        if result["body_images"].get("link_required") and not result["body_images"].get("success"):
+            print("   ❌ 本文画像のアフィリエイトリンク設定が未完了のため、保存・公開処理を中止します")
+            browser.close()
+            return result
 
         if run_top_image:
             if top_image_path:
@@ -4488,6 +4752,9 @@ def post_draft_to_note(
         )
         result["editor_result"] = editor_result
         publish_result = editor_result.get("publish") or {}
+        body_images_result = editor_result.get("body_images") or {}
+        if body_images_result.get("link_required") and not body_images_result.get("success"):
+            result["success"] = False
         if publish:
             result["success"] = bool(publish_result.get("success"))
             if publish_result.get("final_url"):

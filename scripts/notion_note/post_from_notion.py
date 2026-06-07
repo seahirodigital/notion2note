@@ -509,10 +509,10 @@ def _build_article_template(
 
     output_lines = [f"# {title}"]
     _append_template_lines(output_lines, executive_lines)
+    _append_template_lines(output_lines, [AFFILIATE_SLOT_TEMPLATE.format(index=1)])
     _append_template_lines(output_lines, _body_image_marker_lines(body_images))
     if youtube_url:
         _append_template_lines(output_lines, [youtube_url])
-    _append_template_lines(output_lines, [AFFILIATE_SLOT_TEMPLATE.format(index=1)])
     _append_template_lines(output_lines, [TOC_MARKER])
     _append_template_lines(output_lines, [DISCLOSURE_TEXT])
     _append_template_lines(output_lines, [_title_prefixed_h2(title, "インサイトまとめ")])

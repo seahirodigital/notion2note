@@ -1,0 +1,113 @@
+name: Attach note image link lab
+
+on:
+  workflow_dispatch:
+    inputs:
+      note_target:
+        description: "検証に使う note アカウント"
+        required: true
+        default: "blog"
+        type: choice
+        options:
+          - blog
+          - xpost_tech
+          - info_viewer
+      link_url:
+        description: "画像に添付する URL"
+        required: true
+        default: "https://amzn.to/4xdeq3B"
+        type: string
+      fail_on_miss:
+        description: "リンク添付に失敗した場合に workflow を失敗扱いにする"
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  attach-note-image-link-lab:
+    name: note 画像リンク添付隔離実験
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+
+    steps:
+      - name: リポジトリをチェックアウト
+        uses: actions/checkout@v4
+
+      - name: Python 3.13 セットアップ
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: "pip"
+          cache-dependency-path: requirements.txt
+
+      - name: Python 依存パッケージをインストール
+        run: pip install -r requirements.txt
+
+      - name: Playwright ブラウザをインストール
+        run: python -m playwright install chromium
+
+      - name: note 認証情報を選択
+        env:
+          NOTE_TARGET: ${{ inputs.note_target }}
+          BLOG_NOTE_EMAIL: ${{ secrets.NOTE_EMAIL }}
+          BLOG_NOTE_PASSWORD: ${{ secrets.NOTE_PASSWORD }}
+          BLOG_NOTE_STORAGE_STATE: ${{ secrets.NOTE_STORAGE_STATE }}
+          XPOST_NOTE_EMAIL: ${{ secrets.NOTE_EMAIL_XPOST_TECH }}
+          XPOST_NOTE_PASSWORD: ${{ secrets.NOTE_PASSWORD_XPOST_TECH }}
+          XPOST_NOTE_STORAGE_STATE: ${{ secrets.NOTE_STORAGE_STATE_XPOST_TECH }}
+          INFO_VIEWER_NOTE_EMAIL: ${{ secrets.NOTE_EMAIL_INFO_VIEWER }}
+          INFO_VIEWER_NOTE_PASSWORD: ${{ secrets.NOTE_PASSWORD_INFO_VIEWER }}
+          INFO_VIEWER_NOTE_STORAGE_STATE: ${{ secrets.NOTE_STORAGE_STATE_INFO_VIEWER }}
+        run: |
+          if [ "$NOTE_TARGET" = "info_viewer" ]; then
+            echo "NOTE_EMAIL=${INFO_VIEWER_NOTE_EMAIL}" >> "$GITHUB_ENV"
+            echo "NOTE_PASSWORD=${INFO_VIEWER_NOTE_PASSWORD}" >> "$GITHUB_ENV"
+            echo "NOTE_STORAGE_SECRET_NAME=NOTE_STORAGE_STATE_INFO_VIEWER" >> "$GITHUB_ENV"
+            {
+              echo "NOTE_STORAGE_STATE<<__NOTE_STORAGE_STATE__"
+              echo "${INFO_VIEWER_NOTE_STORAGE_STATE}"
+              echo "__NOTE_STORAGE_STATE__"
+            } >> "$GITHUB_ENV"
+          elif [ "$NOTE_TARGET" = "xpost_tech" ]; then
+            echo "NOTE_EMAIL=${XPOST_NOTE_EMAIL}" >> "$GITHUB_ENV"
+            echo "NOTE_PASSWORD=${XPOST_NOTE_PASSWORD}" >> "$GITHUB_ENV"
+            echo "NOTE_STORAGE_SECRET_NAME=NOTE_STORAGE_STATE_XPOST_TECH" >> "$GITHUB_ENV"
+            {
+              echo "NOTE_STORAGE_STATE<<__NOTE_STORAGE_STATE__"
+              echo "${XPOST_NOTE_STORAGE_STATE}"
+              echo "__NOTE_STORAGE_STATE__"
+            } >> "$GITHUB_ENV"
+          else
+            echo "NOTE_EMAIL=${BLOG_NOTE_EMAIL}" >> "$GITHUB_ENV"
+            echo "NOTE_PASSWORD=${BLOG_NOTE_PASSWORD}" >> "$GITHUB_ENV"
+            echo "NOTE_STORAGE_SECRET_NAME=NOTE_STORAGE_STATE" >> "$GITHUB_ENV"
+            {
+              echo "NOTE_STORAGE_STATE<<__NOTE_STORAGE_STATE__"
+              echo "${BLOG_NOTE_STORAGE_STATE}"
+              echo "__NOTE_STORAGE_STATE__"
+            } >> "$GITHUB_ENV"
+          fi
+
+      - name: Ctrl+K 系の画像リンク添付を検証
+        env:
+          PYTHONUTF8: "1"
+          NOTE_TOP_IMAGE_DEBUG: "0"
+        run: |
+          ARGS=(
+            --link-url "${{ inputs.link_url }}"
+            --artifacts-dir "$RUNNER_TEMP/attach-note-image-link-lab"
+          )
+          if [ "${{ inputs.fail_on_miss }}" = "true" ]; then
+            ARGS+=(--fail-on-miss)
+          fi
+          python attach/actions_image_link_lab.py "${ARGS[@]}"
+
+      - name: 検証結果を保存
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: attach-note-image-link-lab-${{ github.run_id }}
+          path: ${{ runner.temp }}/attach-note-image-link-lab

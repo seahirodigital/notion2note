@@ -101,7 +101,6 @@ PAGE_IMAGE_SELECTOR = "main img"
 CROP_DIALOG_SELECTOR = "div.ReactModal__Content.CropModal__content[role='dialog'][aria-modal='true']"
 TOP_IMAGE_LOADING_SELECTOR = "main div[class*='sc-e17b66d3-0']"
 URL_RE = re.compile(r"https?://[^\s\n\r<>\"']+")
-URL_TRAILING_PUNCTUATION = ".,、。;；:：!！?？)]）】」』"
 
 
 class NoteLoginRequiresManualAction(Exception):
@@ -848,32 +847,6 @@ def _save_editor_draft(page) -> str:
     return strategy
 
 
-def _normalize_article_link_url(raw_url: str) -> str:
-    """本文から拾ったURLを画像リンク用に整える。"""
-    url = str(raw_url or "").strip().strip("<>\"'")
-    url = url.rstrip(URL_TRAILING_PUNCTUATION)
-    parsed = urlparse(url)
-    if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
-        return ""
-    return url
-
-
-def _extract_article_link_urls(markdown: str) -> list[str]:
-    """記事本文中のURLを出現順で重複除去して返す。"""
-    urls: list[str] = []
-    seen: set[str] = set()
-    for match in URL_RE.finditer(markdown or ""):
-        url = _normalize_article_link_url(match.group(0))
-        if not url:
-            continue
-        key = url.rstrip("/")
-        if key in seen:
-            continue
-        seen.add(key)
-        urls.append(url)
-    return urls
-
-
 def _editor_has_table_of_contents(page) -> bool:
     return bool(page.evaluate(
         """
@@ -1531,224 +1504,16 @@ def _cleanup_body_image_artifacts(page, text_candidates: list[str]) -> dict:
     )
 
 
-def _click_latest_unlinked_body_image(page) -> dict:
-    return page.evaluate(
-        """
-        () => {
-          const editor = document.querySelector('.note-editable, [contenteditable="true"]') || document.querySelector('.ProseMirror');
-          if (!editor) return { ok: false, reason: 'editor_not_found' };
-          const isVisible = (el) => {
-            if (!el) return false;
-            const rect = el.getBoundingClientRect();
-            const style = window.getComputedStyle(el);
-            return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
-          };
-          const figures = Array.from(editor.querySelectorAll('figure'))
-            .map((figure, figureIndex) => ({ figure, figureIndex, img: figure.querySelector('img') }))
-            .filter((item) => item.img && isVisible(item.img));
-          if (!figures.length) return { ok: false, reason: 'body_image_not_found' };
-          const unlinked = figures.filter((item) => !item.img.closest('a[href]'));
-          const selected = (unlinked.length ? unlinked : figures)[(unlinked.length ? unlinked : figures).length - 1];
-          selected.img.scrollIntoView({ block: 'center', inline: 'center' });
-          const rect = selected.img.getBoundingClientRect();
-          return {
-            ok: true,
-            figure_index: selected.figureIndex,
-            src: selected.img.getAttribute('src') || '',
-            alt: selected.img.getAttribute('alt') || '',
-            x: rect.left + rect.width / 2,
-            y: rect.top + rect.height / 2,
-            rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
-          };
-        }
-        """
-    )
-
-
-def _fill_open_image_link_input(page, link_url: str) -> dict:
-    return page.evaluate(
-        """
-        ({ linkUrl }) => {
-          const editor = document.querySelector('.note-editable, [contenteditable="true"]') || document.querySelector('.ProseMirror');
-          const isVisible = (el) => {
-            if (!el) return false;
-            const rect = el.getBoundingClientRect();
-            const style = window.getComputedStyle(el);
-            return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
-          };
-          const isEditorOwned = (el) => editor && (el === editor || editor.contains(el));
-          const describe = (el) => ({
-            tag: (el.tagName || '').toLowerCase(),
-            type: el.getAttribute('type') || '',
-            placeholder: el.getAttribute('placeholder') || '',
-            aria_label: el.getAttribute('aria-label') || '',
-            class_name: String(el.className || '').slice(0, 160),
-          });
-          const setValue = (el) => {
-            el.focus();
-            if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {
-              el.value = '';
-              el.dispatchEvent(new Event('input', { bubbles: true }));
-              el.value = linkUrl;
-              el.dispatchEvent(new Event('input', { bubbles: true }));
-              el.dispatchEvent(new Event('change', { bubbles: true }));
-              return true;
-            }
-            if (el.isContentEditable) {
-              const selection = window.getSelection();
-              const range = document.createRange();
-              range.selectNodeContents(el);
-              selection.removeAllRanges();
-              selection.addRange(range);
-              document.execCommand('insertText', false, linkUrl);
-              el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: linkUrl }));
-              return true;
-            }
-            return false;
-          };
-          const active = document.activeElement;
-          if (active && isVisible(active) && !isEditorOwned(active) && setValue(active)) {
-            return { ok: true, strategy: 'active_element', target: describe(active) };
-          }
-          const candidates = Array.from(document.querySelectorAll('input,textarea,[contenteditable="true"]'))
-            .filter(isVisible)
-            .filter((el) => !isEditorOwned(el))
-            .map((el) => {
-              const haystack = [
-                el.getAttribute('placeholder') || '',
-                el.getAttribute('aria-label') || '',
-                el.getAttribute('title') || '',
-                el.getAttribute('name') || '',
-                el.getAttribute('type') || '',
-                String(el.className || ''),
-              ].join(' ').toLowerCase();
-              let score = 10;
-              if (haystack.includes('url') || haystack.includes('http')) score -= 6;
-              if (haystack.includes('link') || haystack.includes('リンク')) score -= 5;
-              if ((el.tagName || '').toLowerCase() === 'input') score -= 1;
-              const rect = el.getBoundingClientRect();
-              return { el, score, top: rect.top, left: rect.left };
-            })
-            .sort((a, b) => a.score - b.score || b.top - a.top || a.left - b.left);
-          for (const item of candidates) {
-            if (setValue(item.el)) {
-              return { ok: true, strategy: 'candidate_input', target: describe(item.el), score: item.score };
-            }
-          }
-          return { ok: false, reason: 'link_input_not_found' };
-        }
-        """,
-        {"linkUrl": link_url},
-    )
-
-
-def _body_image_link_state(page, link_url: str, figure_index: int | None = None) -> dict:
-    return page.evaluate(
-        """
-        ({ linkUrl, figureIndex }) => {
-          const editor = document.querySelector('.note-editable, [contenteditable="true"]') || document.querySelector('.ProseMirror');
-          if (!editor) return { success: false, reason: 'editor_not_found', linked_image_count: 0 };
-          const figures = Array.from(editor.querySelectorAll('figure'))
-            .map((figure, index) => {
-              const img = figure.querySelector('img');
-              const anchor = img ? img.closest('a[href]') : null;
-              return {
-                index,
-                has_image: Boolean(img),
-                src: img ? (img.getAttribute('src') || '') : '',
-                href: anchor ? anchor.href : '',
-                matches: Boolean(img && anchor && anchor.href.includes(linkUrl)),
-              };
-            })
-            .filter((item) => item.has_image);
-          const target = Number.isInteger(figureIndex) ? figures.find((item) => item.index === figureIndex) : null;
-          const linkedImageCount = figures.filter((item) => item.matches).length;
-          return {
-            success: target ? target.matches : linkedImageCount > 0,
-            linked_image_count: linkedImageCount,
-            target,
-            figures,
-          };
-        }
-        """,
-        {"linkUrl": link_url, "figureIndex": figure_index},
-    )
-
-
-def _click_image_link_apply_button(page) -> str:
-    strategy = _click_visible_candidate(
-        page,
-        candidates=[
-            ("role_button_適用", page.get_by_role("button", name="適用")),
-            ("button_text_適用", page.locator("button").filter(has_text="適用")),
-        ],
-        description="画像リンク適用",
-        timeout_ms=2000,
-    )
-    page.wait_for_timeout(1000)
-    return strategy
-
-
-def _attach_url_to_latest_body_image(page, link_url: str) -> dict:
-    result = {
-        "success": False,
-        "url": link_url,
-        "strategy": "image_click_ctrl_k",
-    }
-    if not link_url:
-        result["strategy"] = "empty_url"
-        return result
-
-    click_result = _click_latest_unlinked_body_image(page)
-    result["image_click"] = click_result
-    if not click_result.get("ok"):
-        result["error"] = click_result.get("reason") or "画像リンク対象を特定できません"
-        return result
-
-    page.mouse.click(click_result["x"], click_result["y"])
-    page.wait_for_timeout(800)
-    page.keyboard.press("Control+k")
-    page.wait_for_timeout(900)
-
-    fill_result = _fill_open_image_link_input(page, link_url)
-    result["fill"] = fill_result
-    if not fill_result.get("ok"):
-        result["error"] = fill_result.get("reason") or "画像リンクURL入力欄を特定できません"
-        return result
-
-    page.keyboard.press("Enter")
-    page.wait_for_timeout(1200)
-    state = _body_image_link_state(page, link_url, click_result.get("figure_index"))
-    result["state_after_enter"] = state
-    if not state.get("success"):
-        try:
-            result["apply_button_strategy"] = _click_image_link_apply_button(page)
-            state = _body_image_link_state(page, link_url, click_result.get("figure_index"))
-            result["state_after_apply"] = state
-        except Exception as exc:
-            result["apply_button_error"] = str(exc)
-
-    result["success"] = bool(state.get("success"))
-    if not result["success"]:
-        result["error"] = "画像リンクのDOM反映を確認できませんでした"
-    return result
-
-
 def _attach_body_images_to_page(
     page,
     body_image_uploads: list[dict] | None,
     artifacts_dir: Path | None,
-    image_link_urls: list[str] | None = None,
 ) -> dict:
     uploads = body_image_uploads or []
-    link_urls = [url for url in (image_link_urls or []) if url]
     result = {
         "success": True,
         "requested_count": len(uploads),
         "uploaded_count": 0,
-        "linked_count": 0,
-        "image_link_url_count": len(link_urls),
-        "image_link_urls": link_urls,
         "items": [],
         "failures": [],
     }
@@ -1757,15 +1522,10 @@ def _attach_body_images_to_page(
         return result
 
     print(f"   🖼️ Notion本文画像をnote画像ブロックとして添付します: {len(uploads)}件")
-    if link_urls:
-        print(f"   🔗 記事内URLを本文画像へ順番に付与します: URL {len(link_urls)}件")
-    else:
-        print("   🔗 記事内URLがないため、本文画像リンク付与はスキップします")
     cleanup_candidates: list[str] = []
     for index, item in enumerate(uploads, start=1):
         marker = str(item.get("marker") or "")
         image_path = Path(str(item.get("path") or ""))
-        image_link_url = link_urls[(index - 1) % len(link_urls)] if link_urls else ""
         item_cleanup_candidates = _body_image_text_candidates(item)
         cleanup_candidates.extend(item_cleanup_candidates)
         item_result = {
@@ -1773,7 +1533,6 @@ def _attach_body_images_to_page(
             "marker": marker,
             "path": str(image_path),
             "source": str(item.get("source") or ""),
-            "image_link_url": image_link_url,
             "cleanup_candidates": item_cleanup_candidates,
             "success": False,
         }
@@ -1816,27 +1575,7 @@ def _attach_body_images_to_page(
             result["uploaded_count"] += 1
             print(f"   ✅ 本文画像添付完了: {index}/{len(uploads)}")
 
-            link_success = True
-            if image_link_url:
-                link_result = _attach_url_to_latest_body_image(page, image_link_url)
-                item_result["link_result"] = link_result
-                if link_result.get("success"):
-                    item_result["link_success"] = True
-                    result["linked_count"] += 1
-                    print(f"   ✅ 本文画像リンク付与完了: {index}/{len(uploads)} -> {image_link_url}")
-                else:
-                    link_success = False
-                    item_result["link_success"] = False
-                    result["success"] = False
-                    result["failures"].append(item_result)
-                    print(
-                        "   ⚠️ 本文画像リンク付与に失敗しました: "
-                        f"{index}/{len(uploads)} -> {image_link_url} / {link_result.get('error', '')}"
-                    )
-            else:
-                item_result["link_success"] = None
-
-            item_result["success"] = link_success
+            item_result["success"] = True
             page.wait_for_timeout(800)
         except Exception as exc:
             item_result["error"] = str(exc)
@@ -3944,7 +3683,6 @@ def _run_ogp_expansion_on_draft(
         "editor_url": editor_url,
         "ogp_processed_count": 0,
         "toc": {},
-        "article_image_link_urls": [],
         "body_images": {},
         "top_image": {},
         "publish": {},
@@ -3953,12 +3691,6 @@ def _run_ogp_expansion_on_draft(
 
     print(f"\n── Phase 4: OGP展開 + 目次 + トップ画像（Playwright） ──")
     print(f"   対象URL: {editor_url}")
-    article_image_link_urls = _extract_article_link_urls(source_markdown)
-    result["article_image_link_urls"] = article_image_link_urls
-    if article_image_link_urls:
-        print(f"   🔗 本文画像リンク用URLを記事内から抽出しました: {len(article_image_link_urls)}件")
-    else:
-        print("   🔗 本文画像リンク用URLは記事内から見つかりませんでした")
 
     playwright_cookies = _cookies_to_playwright(cookies_dict)
 
@@ -4021,7 +3753,6 @@ def _run_ogp_expansion_on_draft(
                 page,
                 body_image_uploads=body_image_uploads,
                 artifacts_dir=artifacts_dir,
-                image_link_urls=article_image_link_urls,
             )
         except Exception as e:
             result["body_images"] = {"success": False, "error": str(e)}

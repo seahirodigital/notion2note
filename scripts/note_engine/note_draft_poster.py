@@ -625,11 +625,36 @@ def _dump_upload_retry_artifacts(page, artifacts_dir: Path | None, stem: str) ->
 
 
 def _click_top_image_button(page) -> str:
+    name_pattern = re.compile(
+        r"画像\s*を?\s*追加|見出し画像|トップ画像|カバー画像|サムネイル画像|アイキャッチ"
+    )
     return _click_visible_candidate(
         page,
         candidates=[
+            ("role_button_top_image_name", page.get_by_role("button", name=name_pattern)),
             ("button[aria-label='画像を追加']", page.locator(TOP_IMAGE_BUTTON_SELECTOR)),
-            ("button[aria-label*='画像']", page.locator("button[aria-label*='画像']")),
+            (
+                "clickable_aria_top_image_name",
+                page.locator(
+                    "button[aria-label*='画像を追加'], [role='button'][aria-label*='画像を追加'], "
+                    "button[aria-label*='見出し画像'], [role='button'][aria-label*='見出し画像'], "
+                    "button[aria-label*='トップ画像'], [role='button'][aria-label*='トップ画像'], "
+                    "button[aria-label*='カバー画像'], [role='button'][aria-label*='カバー画像']"
+                ),
+            ),
+            (
+                "clickable_title_top_image_name",
+                page.locator(
+                    "button[title*='画像を追加'], [role='button'][title*='画像を追加'], "
+                    "button[title*='見出し画像'], [role='button'][title*='見出し画像'], "
+                    "button[title*='トップ画像'], [role='button'][title*='トップ画像'], "
+                    "button[title*='カバー画像'], [role='button'][title*='カバー画像']"
+                ),
+            ),
+            (
+                "clickable_text_top_image_name",
+                page.locator("button, [role='button']").filter(has_text=name_pattern),
+            ),
         ],
         description="トップ画像ボタン",
     )
